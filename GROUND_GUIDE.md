@@ -70,6 +70,7 @@ Scene Root (0, 0, 0)
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import RAPIER from '@dimforge/rapier3d';
 ```
 
@@ -263,6 +264,7 @@ Yeh poora crash-proof file code hai. Isko directly copy karke paste kar sakte ha
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import RAPIER from '@dimforge/rapier3d';
 
 function ThreeScene() {
@@ -302,6 +304,15 @@ function ThreeScene() {
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         container.appendChild(renderer.domElement);
+
+        // 2b. OrbitControls (Rotate and Pan the Camera)
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.target.set(0, 0.5, 0);
+        controls.maxPolarAngle = Math.PI / 2 - 0.05; // Prevent camera dipping below ground
+        controls.minDistance = 2;
+        controls.maxDistance = 50;
 
         // ----------------------------------------------------
         // 3. PHASE 1: GROUND SETUP (THREE.JS + RAPIER)
@@ -431,6 +442,9 @@ function ThreeScene() {
             animationId = requestAnimationFrame(animate);
 
             try {
+                // Update camera orbit controls
+                controls.update();
+
                 // Step Rapier physics world forward
                 world.step();
 
@@ -473,6 +487,7 @@ function ThreeScene() {
             groundGeometry.dispose();
             groundMaterial.dispose();
             grid.dispose();
+            controls.dispose();
             renderer.dispose();
 
             if (renderer.domElement && renderer.domElement.parentNode) {

@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@dimforge/rapier3d": "^0.21.0",
+    "@dimforge/rapier3d-compat": "^0.21.0",
     "@tailwindcss/vite": "^4.3.5",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
