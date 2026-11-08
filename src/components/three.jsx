@@ -1129,7 +1129,7 @@ function ThreeScene() {
             
             {/* Bottom-Left Speedometer & Driving HUD */}
             <div className="absolute top-6 left-6 pointer-events-none  z-10 flex flex-col gap-2">
-                <div className="flex items-baseline gap-2 bg-neutral-900/85 backdrop-blur-md border border-white/10 mx-auto flex flex-center py-10 rounded-2xl px-5 py-3 shadow-2xl">
+                <div className="flex items-baseline gap-2 bg-neutral-900/85 backdrop-blur-md border border-white/10 mx-auto flex justify-center items-center py-10 rounded-2xl pl-5 py-3 shadow-2xl">
                     <span ref={speedRef} className="text-5xl font-mono font-black tracking-tight text-white">0</span>
                     <span className="text-sm font-mono font-bold text-neutral-400">KM/H</span>
                     <div className="ml-4 pl-4 border-l border-white/10 flex flex-col">
