@@ -13,8 +13,8 @@ function ThreeScene() {
     const nitroBadgeRef = useRef(null);
     const cameraBadgeRef = useRef(null);
 
-    const [debugVisible, setDebugVisible] = useState(true);
-    const debugVisibleRef = useRef(true);
+    const [debugVisible, setDebugVisible] = useState(false);
+    const debugVisibleRef = useRef(false);
     const [cameraMode, setCameraMode] = useState('auto'); // 'auto' | 'free_orbit'
     const cameraModeRef = useRef('auto');
 
@@ -69,6 +69,13 @@ function ThreeScene() {
                 step: 1.0,
                 label: 'Spawn Plateau (m)'
             },
+            segments: {
+                value: DEFAULT_GROUND_CONFIG.segments,
+                min: 50,
+                max: 200,
+                step: 10,
+                label: 'Mesh Subdivisions'
+            },
         }),
         'Shader Styling': folder({
             grassColor: {
@@ -98,7 +105,57 @@ function ThreeScene() {
         })
     });
 
+    const tyreParams = useControls('Tyre Colliders', {
+        colliderShape: {
+            value: 'roundCylinder',
+            options: {
+                'Smooth Round Cylinder (Default)': 'roundCylinder',
+                'Flat Cylinder': 'cylinder',
+                'Smooth Capsule': 'capsule',
+                'Sphere (Ball)': 'ball'
+            },
+            label: 'Collider Profile'
+        },
+        tyreWidth: {
+            value: 0.24,
+            min: 0.16,
+            max: 0.32,
+            step: 0.01,
+            label: 'Tyre Width (m)'
+        },
+        shoulderBevel: {
+            value: 0.025,
+            min: 0.005,
+            max: 0.05,
+            step: 0.005,
+            label: 'Shoulder Bevel (m)'
+        },
+        tyreRadius: {
+            value: 0.312,
+            min: 0.280,
+            max: 0.350,
+            step: 0.002,
+            label: 'Tyre Radius (m)'
+        },
+        highSpeedDownforce: {
+            value: 1.8,
+            min: 0.0,
+            max: 4.0,
+            step: 0.1,
+            label: 'Downforce Grip'
+        },
+        bounceDamper: {
+            value: 1.2,
+            min: 0.0,
+            max: 3.0,
+            step: 0.1,
+            label: 'Bounce Absorption'
+        }
+    });
+
     const groundParamsRef = useRef(groundParams);
+    const tyreParamsRef = useRef(tyreParams);
+    const rebuildWheelCollidersRef = useRef(null);
 
     // Propagate Leva changes to active Ground instance
     useEffect(() => {
@@ -107,6 +164,19 @@ function ThreeScene() {
             groundRef.current.updateParams(groundParams, carBodyRef.current);
         }
     }, [groundParams]);
+
+    // Propagate Leva changes to wheel colliders in real time
+    useEffect(() => {
+        tyreParamsRef.current = tyreParams;
+        if (rebuildWheelCollidersRef.current) {
+            rebuildWheelCollidersRef.current(
+                tyreParams.colliderShape,
+                tyreParams.tyreWidth,
+                tyreParams.shoulderBevel,
+                tyreParams.tyreRadius
+            );
+        }
+    }, [tyreParams]);
 
     // Keep refs in sync for animation loop
     useEffect(() => {
@@ -239,10 +309,10 @@ function ThreeScene() {
         debugLines.renderOrder = 999;
         scene.add(debugLines);
 
-        // 8. Respawn Function Helper
+        // 8. Respawn Function Helper (Spawns settled flush on ground with zero drop bounce)
         const respawnCar = () => {
             if (!carBody || !ground) return;
-            const spawnY = ground.getHeightAt(0, 0) + 0.45;
+            const spawnY = ground.getHeightAt(0, 0) + 0.085;
             carBody.setTranslation({ x: 0, y: spawnY, z: 0 }, true);
             carBody.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
             carBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
@@ -355,7 +425,7 @@ function ThreeScene() {
                 world = new RAPIER.World(gravity);
 
                 // Solver Iterations for crisp, smooth collisions
-                world.integrationParameters.numSolverIterations = 8;
+                world.integrationParameters.numSolverIterations = 10;
 
                 // Attach Ground Trimesh Physics Collider to Rapier Scene
                 ground.createPhysics(world, RAPIER);
@@ -368,8 +438,8 @@ function ThreeScene() {
                 world.createCollider(RAPIER.ColliderDesc.cuboid(2, 35, 120).setTranslation(-120, 0, 0), wallBody);
 
                 // Dynamic Car RigidBody with CCD
-                // Spawns smoothly right on the smooth Perlin plateau
-                const initialSpawnY = ground.getHeightAt(0, 0) + 0.45;
+                // Spawns smoothly resting right on the ground (contact at Y = 0.000m)
+                const initialSpawnY = ground.getHeightAt(0, 0) + 0.085;
                 const carBodyDesc = RAPIER.RigidBodyDesc.dynamic()
                     .setTranslation(0, initialSpawnY, 0)
                     .setLinearDamping(0.08)
@@ -382,11 +452,12 @@ function ThreeScene() {
                 const chassisColliderDesc = RAPIER.ColliderDesc.cuboid(1.95, 0.38, 0.80)
                     .setTranslation(0.22, 0.70, 0)
                     .setRestitution(0.0) // Non-bouncy chassis
+                    .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min)
                     .setMass(CAR_MASS)
                     .setFriction(0.1);
                 world.createCollider(chassisColliderDesc, carBody);
 
-                // Four Wheel Colliders
+                // Four Wheel Colliders with Smooth Unified Circular Geometry (Zero Subdivided Slices)
                 const wheelOffsets = [
                     { name: 'Wheel_BL', x: -1.037, y: 0.232, z: -0.703 },
                     { name: 'Wheel_BR', x: -1.037, y: 0.232, z:  0.700 },
@@ -394,15 +465,64 @@ function ThreeScene() {
                     { name: 'Wheel_FR', x:  1.515, y: 0.232, z:  0.700 }
                 ];
 
-                wheelOffsets.forEach(w => {
-                    const wheelColliderDesc = RAPIER.ColliderDesc.ball(0.33)
-                        .setTranslation(w.x, w.y, w.z)
-                        .setMass(WHEEL_MASS)
-                        .setFriction(0.05)
-                        .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min)
-                        .setRestitution(0.0);
-                    world.createCollider(wheelColliderDesc, carBody);
-                });
+                let activeWheelColliders = [];
+                // 90° rotation around X-axis so cylinder axis aligns with the wheel axle (Z-axis)
+                const cylinderAxleRotation = { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
+
+                function buildWheelColliders(shape = 'roundCylinder', width = 0.24, bevel = 0.025, targetRadius = 0.312) {
+                    if (!world || !carBody) return;
+                    activeWheelColliders.forEach(col => {
+                        try {
+                            world.removeCollider(col, false);
+                        } catch {
+                            // ignore already-removed colliders
+                        }
+                    });
+                    activeWheelColliders = [];
+
+                    wheelOffsets.forEach(w => {
+                        let wheelColliderDesc;
+
+                        if (shape === 'ball') {
+                            wheelColliderDesc = RAPIER.ColliderDesc.ball(targetRadius);
+                        } else if (shape === 'capsule') {
+                            const capHalfHeight = Math.max(width / 2 - targetRadius, 0.01);
+                            wheelColliderDesc = RAPIER.ColliderDesc.capsule(capHalfHeight, targetRadius)
+                                .setRotation(cylinderAxleRotation);
+                        } else if (shape === 'cylinder') {
+                            const halfWidth = width / 2;
+                            wheelColliderDesc = RAPIER.ColliderDesc.cylinder(halfWidth, targetRadius)
+                                .setRotation(cylinderAxleRotation);
+                        } else {
+                            // Default: 'roundCylinder' - Smooth continuous circular cylinder with rounded bevel shoulders
+                            // Prevents trimesh edge snagging and eliminates multiple sliced subdivisions
+                            const roundRadius = Math.min(bevel, width * 0.45);
+                            const halfWidth = Math.max(width / 2 - roundRadius, 0.01);
+                            const cylRadius = Math.max(targetRadius - roundRadius, 0.05);
+                            wheelColliderDesc = RAPIER.ColliderDesc.roundCylinder(halfWidth, cylRadius, roundRadius)
+                                .setRotation(cylinderAxleRotation);
+                        }
+
+                        wheelColliderDesc
+                            .setTranslation(w.x, w.y, w.z)
+                            .setMass(WHEEL_MASS)
+                            .setFriction(0.05)
+                            .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min)
+                            .setRestitution(0.0)
+                            .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min);
+
+                        const col = world.createCollider(wheelColliderDesc, carBody);
+                        activeWheelColliders.push(col);
+                    });
+                }
+
+                rebuildWheelCollidersRef.current = buildWheelColliders;
+                buildWheelColliders(
+                    tyreParamsRef.current.colliderShape,
+                    tyreParamsRef.current.tyreWidth,
+                    tyreParamsRef.current.shoulderBevel,
+                    tyreParamsRef.current.tyreRadius
+                );
 
                 // Obstacle Generator Helper (Smashable crates scattered along the terrain)
                 function addObstacle(x, z, width = 1.5, height = 1.5, depth = 1.5, mass = 15, color = 0xd97736, yOffset = null) {
@@ -611,8 +731,8 @@ function ThreeScene() {
                         targetYawRate = THREE.MathUtils.clamp(targetYawRate, -maxYawRate, maxYawRate);
                     }
                     const newYaw = THREE.MathUtils.damp(currentYaw, targetYawRate, 8.0, delta);
-                    const newPitch = THREE.MathUtils.damp(currentPitch, 0.0, 3.5, delta);
-                    const newRoll = THREE.MathUtils.damp(currentRoll, 0.0, 5.0, delta);
+                    const newPitch = THREE.MathUtils.damp(currentPitch, 0.0, 1.5, delta);
+                    const newRoll = THREE.MathUtils.damp(currentRoll, 0.0, 2.5, delta);
 
                     const newAngVec = new THREE.Vector3()
                         .addScaledVector(up, newYaw)
@@ -621,18 +741,30 @@ function ThreeScene() {
 
                     carBody.setAngvel(newAngVec, true);
 
-                    // Upright stabilization spring with derivative damping (eliminates wobble & oscillation)
-                    const uprightAngle = Math.acos(THREE.MathUtils.clamp(up.y, -1, 1));
+                    // Upright stabilization spring aligned with terrain normal (smoothly hugs slopes without bouncing)
+                    let targetUp = new THREE.Vector3(0, 1, 0);
+                    if (ground) {
+                        const carTrans = carBody.translation();
+                        const terrainH = ground.getHeightAt(carTrans.x, carTrans.z);
+                        const clearance = carTrans.y - terrainH;
+                        const groundNormal = ground.getNormalAt(carTrans.x, carTrans.z);
+                        const groundFactor = THREE.MathUtils.clamp(1.0 - (clearance - 0.1) / 1.2, 0.0, 1.0);
+                        targetUp.copy(groundNormal).multiplyScalar(groundFactor)
+                            .addScaledVector(new THREE.Vector3(0, 1, 0), 1.0 - groundFactor).normalize();
+                    }
+
+                    const uprightDot = THREE.MathUtils.clamp(up.dot(targetUp), -1, 1);
+                    const uprightAngle = Math.acos(uprightDot);
                     if (uprightAngle > 0.02) {
-                        const correctionAxis = new THREE.Vector3(0, 1, 0).cross(up).normalize();
+                        const correctionAxis = new THREE.Vector3().crossVectors(up, targetUp).normalize();
                         const angvelAlongAxis = angvel.x * correctionAxis.x + angvel.y * correctionAxis.y + angvel.z * correctionAxis.z;
                         const springTorque = uprightAngle * CAR_MASS * 5.0;
                         const dampingTorque = angvelAlongAxis * CAR_MASS * 0.45;
                         const netTorque = (springTorque - dampingTorque) * delta;
                         carBody.applyTorqueImpulse({
-                            x: -correctionAxis.x * netTorque,
-                            y: -correctionAxis.y * netTorque,
-                            z: -correctionAxis.z * netTorque
+                            x: correctionAxis.x * netTorque,
+                            y: correctionAxis.y * netTorque,
+                            z: correctionAxis.z * netTorque
                         }, true);
                     }
 
@@ -641,6 +773,30 @@ function ThreeScene() {
                     wheels.forEach(wheel => {
                         wheel.rotateX(rollDelta);
                     });
+
+                    // 4b. High-Speed Aerodynamic Downforce (Keeps car firmly planted on terrain, prevents bouncing at 100+ km/h)
+                    const downforceFactor = tyreParamsRef.current.highSpeedDownforce ?? 1.8;
+                    if (absSpeed > 5.0 && downforceFactor > 0) {
+                        const downforce = (absSpeed * absSpeed) * downforceFactor * CAR_MASS * 0.0012;
+                        carBody.applyImpulse({
+                            x: -up.x * downforce * delta,
+                            y: -up.y * downforce * delta,
+                            z: -up.z * downforce * delta
+                        }, true);
+                    }
+
+                    // 4c. Vertical Bounce Absorption (Suspension shock absorption when driving fast over rough terrain)
+                    const bounceDamperVal = tyreParamsRef.current.bounceDamper ?? 1.2;
+                    if (bounceDamperVal > 0 && ground) {
+                        const carTrans = carBody.translation();
+                        const groundH = ground.getHeightAt(carTrans.x, carTrans.z);
+                        const groundClearance = carTrans.y - groundH;
+                        // When near the terrain surface (< 0.65m) and experiencing sudden upward bounce (> 0.20 m/s)
+                        if (groundClearance < 0.65 && linvel.y > 0.20) {
+                            const reboundImpulse = linvel.y * CAR_MASS * Math.min(8.0 * bounceDamperVal * delta, 0.45);
+                            carBody.applyImpulse({ x: 0, y: -reboundImpulse, z: 0 }, true);
+                        }
+                    }
 
                     // 5. Dynamic Camera FOV with smooth damping
                     const targetFov = isBoosting ? 80 : 75;
@@ -682,8 +838,13 @@ function ThreeScene() {
                     }
                 }
 
-                // Step physics simulation
-                world.step();
+                // Step physics simulation with adaptive substepping at high speeds to prevent tunnelling and terrain bounce
+                const isHighSpeed = keys.shift && keys.w;
+                const subSteps = isHighSpeed ? 2 : 1;
+                world.timestep = delta / subSteps;
+                for (let s = 0; s < subSteps; s++) {
+                    world.step();
+                }
 
                 // Synchronize visual car with physics
                 if (carScene && carBody) {
@@ -888,6 +1049,7 @@ function ThreeScene() {
             window.removeEventListener('blur', handleBlur);
             window.removeEventListener('car:respawn', handleCarRespawn);
             window.removeEventListener('ground:rebuild-physics', handleRebuildPhysics);
+            rebuildWheelCollidersRef.current = null;
 
             if (ground) {
                 ground.dispose();

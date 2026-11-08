@@ -106,18 +106,18 @@ export function getTerrainNormal(x, z, params = DEFAULT_GROUND_CONFIG, eps = 0.3
 // -------------------------------------------------------------
 
 export const DEFAULT_GROUND_CONFIG = {
-    elevation: 3.8,         // Height amplitude of rolling hills
-    frequency: 0.014,       // Noise wavelength scale (smooth large curves)
+    elevation: 10.00,         // Height amplitude of rolling hills
+    frequency: 0.03,       // Noise wavelength scale (smooth large curves)
     octaves: 3,             // Octave layering (1 to 5)
-    persistence: 0.35,      // Roughness factor
+    persistence: 0.70,      // Roughness factor
     lacunarity: 2.0,        // Frequency multiplier per octave
     spawnFlatRadius: 12.0,  // Level ground radius at (0, 0)
-    grassColor: '#4a782e',  // Lush grass color
+    grassColor: '#9da8ce',  // Lush grass color
     dirtColor: '#241b12',   // Valley earth color
     rockColor: '#52565e',   // Steep slope cliff rock color
     wireframe: false,       // Wireframe debug toggle
-    size: 240,              // World terrain dimension in meters (240x240m)
-    segments: 180,          // Mesh grid resolution
+    size: 250,              // World terrain dimension in meters (240x240m)
+    segments: 100,          // Mesh grid resolution (optimized for silky smooth 60+ FPS performance)
 };
 
 // -------------------------------------------------------------
@@ -416,6 +416,7 @@ export class Ground {
 
         const colliderDesc = this.RAPIER.ColliderDesc.trimesh(vertices, indices)
             .setRestitution(0.0)
+            .setRestitutionCombineRule(this.RAPIER.CoefficientCombineRule.Min)
             .setFriction(0.85);
 
         this.collider = this.world.createCollider(colliderDesc, this.physicsBody);
@@ -424,6 +425,12 @@ export class Ground {
     // Handle updates from Leva controls in real time
     updateParams(newParams, carBody = null) {
         let geometryNeedsUpdate = false;
+        let resolutionNeedsRebuild = false;
+
+        if (newParams.segments !== undefined && Math.round(newParams.segments) !== this.params.segments) {
+            resolutionNeedsRebuild = true;
+            geometryNeedsUpdate = true;
+        }
 
         const keysToCheck = ['elevation', 'frequency', 'octaves', 'persistence', 'lacunarity', 'spawnFlatRadius'];
         for (const key of keysToCheck) {
@@ -435,6 +442,25 @@ export class Ground {
 
         // Apply new values to config
         this.params = { ...this.params, ...newParams };
+        if (newParams.segments !== undefined) {
+            this.params.segments = Math.round(newParams.segments);
+        }
+
+        if (resolutionNeedsRebuild) {
+            if (this.geometry) {
+                this.geometry.dispose();
+            }
+            this.geometry = new THREE.PlaneGeometry(
+                this.params.size,
+                this.params.size,
+                this.params.segments,
+                this.params.segments
+            );
+            this.geometry.rotateX(-Math.PI / 2);
+            if (this.mesh) {
+                this.mesh.geometry = this.geometry;
+            }
+        }
 
         // 1. Instant GPU Shader Uniform updates (60fps responsive)
         if (this.material && this.material.uniforms) {
