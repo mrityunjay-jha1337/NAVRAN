@@ -4,6 +4,17 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 
+// Mathematical height function for the irregular ground
+function getTerrainHeight(x, z) {
+    const px = x;
+    const py = -z;
+    return (
+        Math.sin(px * 0.05) * 3 +
+        Math.cos(py * 0.08) * 4 +
+        Math.sin((px + py) * 0.03) * 5
+    );
+}
+
 function ThreeScene() {
     const mountRef = useRef(null);
     const speedRef = useRef(null);
@@ -46,6 +57,7 @@ function ThreeScene() {
         const WHEELBASE = 2.55;                    // 2.55m distance between front & rear axles
         const WHEEL_RADIUS = 0.325;                // Matches wheel collider
 
+        const initialSpawnY = getTerrainHeight(0, 0) + 0.45;
         let prevCarCenter = null;
         let isDrivingState = false;
         let currentCamDir = -1.0; // -1.0 = behind car (forward), +1.0 = in front of car facing it (reverse)
@@ -64,6 +76,7 @@ function ThreeScene() {
         // 1. Scene
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x181a1f);
+        scene.fog = new THREE.Fog(0x181a1f, 90, 190);
 
         // 2. Camera (Starts directly behind car looking forward - GTA 3rd person)
         const camera = new THREE.PerspectiveCamera(
@@ -72,8 +85,8 @@ function ThreeScene() {
             0.1,
             1000
         );
-        camera.position.set(-6.5, 2.6, 0);
-        const currentLookTarget = new THREE.Vector3(3.5, 1.2, 0);
+        camera.position.set(-6.5, initialSpawnY + 2.4, 0);
+        const currentLookTarget = new THREE.Vector3(3.5, initialSpawnY + 1.2, 0);
         camera.lookAt(currentLookTarget);
 
         // 3. Renderer with Soft Shadows
@@ -92,7 +105,7 @@ function ThreeScene() {
         controls.enableDamping = true;
         controls.dampingFactor = 0.05;
         controls.enablePan = false; // Keep orbit centered strictly on the car
-        controls.target.set(0, 0.85, 0);
+        controls.target.set(0, initialSpawnY + 0.85, 0);
         controls.maxPolarAngle = Math.PI / 2 - 0.05; // Never dip below ground level
         controls.minPolarAngle = 0.08;
         controls.minDistance = 2.0;
@@ -104,39 +117,52 @@ function ThreeScene() {
         };
         controls.addEventListener('start', onOrbitStart);
 
-        // 5. Solid Ground Mesh (Expansive 2000m x 2000m driving arena)
-        const groundWidth = 2000;
-        const groundThickness = 1;
-        const groundDepth = 2000;
+        // 5. Irregular Ground (Faceted Low-Poly Terrain)
+        const geometry = new THREE.PlaneGeometry(
+            200, 200,
+            100, 100
+        );
 
-        const groundGeometry = new THREE.BoxGeometry(groundWidth, groundThickness, groundDepth);
-        const groundMaterial = new THREE.MeshStandardMaterial({
-            color: 0x1f2227,
+        const positions = geometry.attributes.position;
+
+        for (let i = 0; i < positions.count; i++) {
+            const x = positions.getX(i);
+            const y = positions.getY(i);
+
+            const height =
+                Math.sin(x * 0.05) * 3 +
+                Math.cos(y * 0.08) * 4 +
+                Math.sin((x + y) * 0.03) * 5;
+
+            positions.setZ(i, height);
+        }
+
+        geometry.computeVertexNormals();
+
+        const material = new THREE.MeshStandardMaterial({
+            color: 0x668844,
+            flatShading: true,
             roughness: 0.85,
             metalness: 0.1
         });
-        const groundMesh = new THREE.Mesh(groundGeometry, groundMaterial);
-        groundMesh.position.y = -groundThickness / 2; // Top surface at Y = 0.0
-        groundMesh.receiveShadow = true;
-        scene.add(groundMesh);
 
-        // Visual Grid (placed at 1mm so it doesn't slice through tyres, spaced every 5m)
-        const grid = new THREE.GridHelper(groundWidth, 400, 0x00ff88, 0x3a3f47);
-        grid.position.y = 0.001;
-        scene.add(grid);
+        const terrain = new THREE.Mesh(geometry, material);
+        terrain.rotation.x = -Math.PI / 2;
+        terrain.receiveShadow = true;
+        scene.add(terrain);
 
         // 6. Lighting with Dynamic Car-Proximity Shadow Mapping
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
         scene.add(ambientLight);
 
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 2.5);
-        const sunOffset = new THREE.Vector3(25, 38, 20);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 2.6);
+        const sunOffset = new THREE.Vector3(25, 40, 20);
         directionalLight.position.copy(sunOffset);
         directionalLight.castShadow = true;
         directionalLight.shadow.mapSize.width = 2048;
         directionalLight.shadow.mapSize.height = 2048;
         directionalLight.shadow.camera.near = 1.0;
-        directionalLight.shadow.camera.far = 110.0;
+        directionalLight.shadow.camera.far = 120.0;
 
         // Dynamic proximity bounds around the vehicle / camera
         const SHADOW_RADIUS = 35.0;
@@ -187,21 +213,22 @@ function ThreeScene() {
 
             // R: Reset car to ground position & reset camera
             if ((k === 'r' || code === 'KeyR') && carBody) {
-                carBody.setTranslation({ x: 0, y: 0.15, z: 0 }, true);
+                const resetY = getTerrainHeight(0, 0) + 0.45;
+                carBody.setTranslation({ x: 0, y: resetY, z: 0 }, true);
                 carBody.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
                 carBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
                 carBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
 
-                prevCarCenter = new THREE.Vector3(0, 1.0, 0);
+                prevCarCenter = new THREE.Vector3(0, resetY + 0.85, 0);
                 isDrivingState = false;
                 currentCamDir = -1.0;
                 currentFollowDist = 7.0;
                 currentFollowHeight = 2.1;
                 userHasManuallyOrbited = false;
-                camera.position.set(-6.8, 2.4, 0);
-                currentLookTarget.set(0, 1.0, 0);
+                camera.position.set(-6.8, resetY + 2.4, 0);
+                currentLookTarget.set(0, resetY + 1.0, 0);
                 camera.lookAt(currentLookTarget);
-                controls.target.set(0, 0.85, 0);
+                controls.target.set(0, resetY + 0.85, 0);
                 controls.update();
             }
 
@@ -251,48 +278,57 @@ function ThreeScene() {
                 await RAPIER.init();
                 if (!isMounted) return;
 
-                // Realistic Stronger Gravity (Negative pulls DOWNWARDS)
-                const gravity = { x: 0.0, y: -18.0, z: 0.0 };
+                // Strong Realistic Gravity
+                const gravity = { x: 0.0, y: -20.0, z: 0.0 };
                 world = new RAPIER.World(gravity);
 
-                // Increase Solver Iterations for crisp, solid collisions (No squishing/sticking)
+                // Increase Solver Iterations for solid, crisp collisions
                 world.integrationParameters.numSolverIterations = 8;
 
-                // Static Ground Collider
-                const groundBodyDesc = RAPIER.RigidBodyDesc.fixed();
+                // Static Ground Collider (Trimesh matching the irregular terrain)
+                const groundBodyDesc = RAPIER.RigidBodyDesc.fixed()
+                    .setRotation({
+                        x: terrain.quaternion.x,
+                        y: terrain.quaternion.y,
+                        z: terrain.quaternion.z,
+                        w: terrain.quaternion.w
+                    });
                 const groundBody = world.createRigidBody(groundBodyDesc);
-                const groundColliderDesc = RAPIER.ColliderDesc.cuboid(
-                    groundWidth / 2,
-                    groundThickness / 2,
-                    groundDepth / 2
-                )
-                    .setTranslation(0, -groundThickness / 2, 0)
+
+                const vertices = Float32Array.from(geometry.attributes.position.array);
+                const indices = Uint32Array.from(geometry.index.array);
+
+                const groundColliderDesc = RAPIER.ColliderDesc.trimesh(vertices, indices)
                     .setRestitution(0.0)
-                    .setFriction(0.8);
+                    .setFriction(0.85);
                 world.createCollider(groundColliderDesc, groundBody);
 
-                // Dynamic Car RigidBody with CCD (Continuous Collision Detection prevents tunneling/sticking)
-                // Spawns smoothly right on the ground surface
+                // Boundary walls around perimeter (200m x 200m) to keep the car inside
+                const wallBody = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+                world.createCollider(RAPIER.ColliderDesc.cuboid(100, 35, 2).setTranslation(0, 0, 100), wallBody);
+                world.createCollider(RAPIER.ColliderDesc.cuboid(100, 35, 2).setTranslation(0, 0, -100), wallBody);
+                world.createCollider(RAPIER.ColliderDesc.cuboid(2, 35, 100).setTranslation(100, 0, 0), wallBody);
+                world.createCollider(RAPIER.ColliderDesc.cuboid(2, 35, 100).setTranslation(-100, 0, 0), wallBody);
+
+                // Dynamic Car RigidBody with CCD
+                // Spawns smoothly right on the terrain surface
                 const carBodyDesc = RAPIER.RigidBodyDesc.dynamic()
-                    .setTranslation(0, 0.15, 0)
+                    .setTranslation(0, initialSpawnY, 0)
                     .setLinearDamping(0.04)
                     .setAngularDamping(2.0)
                     .setCcdEnabled(true);
                 carBody = world.createRigidBody(carBodyDesc);
 
-                // Lock pitch (Z) and roll (X) so the car NEVER tilts into the ground or flips over (True GTA arcade feel!)
-                carBody.setEnabledRotations(false, true, false, true);
-
-                // Chassis Collider (Full 100% coverage: bumpers, hood, roof & doors)
-                // Half-extents: length=2.20, height=0.48, width=0.85 centered at (0.22, 0.65, 0)
-                const chassisColliderDesc = RAPIER.ColliderDesc.cuboid(2.20, 0.48, 0.85)
-                    .setTranslation(0.22, 0.65, 0)
-                    .setRestitution(0.35)
+                // Chassis Collider
+                // Half-extents: length=1.95, height=0.38, width=0.80 centered at (0.22, 0.70, 0)
+                const chassisColliderDesc = RAPIER.ColliderDesc.cuboid(1.95, 0.38, 0.80)
+                    .setTranslation(0.22, 0.70, 0)
+                    .setRestitution(0.15)
                     .setMass(CAR_MASS)
                     .setFriction(0.1);
                 world.createCollider(chassisColliderDesc, carBody);
 
-                // Four Wheel Colliders (0.0 rolling friction allows smooth rolling without drag; lateral grip handled in code)
+                // Four Wheel Colliders
                 const wheelOffsets = [
                     { name: 'Wheel_BL', x: -1.037, y: 0.232, z: -0.703 },
                     { name: 'Wheel_BR', x: -1.037, y: 0.232, z:  0.700 },
@@ -301,10 +337,10 @@ function ThreeScene() {
                 ];
 
                 wheelOffsets.forEach(w => {
-                    const wheelColliderDesc = RAPIER.ColliderDesc.ball(WHEEL_RADIUS)
+                    const wheelColliderDesc = RAPIER.ColliderDesc.ball(0.33)
                         .setTranslation(w.x, w.y, w.z)
                         .setMass(WHEEL_MASS)
-                        .setFriction(0.0)
+                        .setFriction(0.05)
                         .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min)
                         .setRestitution(0.0);
                     world.createCollider(wheelColliderDesc, carBody);
@@ -312,7 +348,8 @@ function ThreeScene() {
 
                 // Obstacle Generator Helper (Lightweight, knockable dynamic blocks)
                 function addObstacle(x, z, width = 1.5, height = 1.5, depth = 1.5, mass = 15, color = 0xd97736, yOffset = null) {
-                    const y = yOffset !== null ? yOffset : height / 2;
+                    const terrainH = getTerrainHeight(x, z);
+                    const y = yOffset !== null ? terrainH + yOffset : terrainH + height / 2;
 
                     // 1. Visual Box Mesh
                     const geom = new THREE.BoxGeometry(width, height, depth);
@@ -327,7 +364,7 @@ function ThreeScene() {
                     mesh.receiveShadow = true;
                     scene.add(mesh);
 
-                    // 2. Rapier Dynamic Body with CCD (Ultra-lightweight: 15-20 kg)
+                    // 2. Rapier Dynamic Body with CCD
                     const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
                         .setTranslation(x, y, z)
                         .setLinearDamping(0.3)
@@ -337,8 +374,8 @@ function ThreeScene() {
 
                     const colliderDesc = RAPIER.ColliderDesc.cuboid(width / 2, height / 2, depth / 2)
                         .setFriction(0.2)
-                        .setRestitution(0.45) // Bouncy knockback on impact!
-                        .setMass(mass);       // Ultra-lightweight so car smashes them away easily
+                        .setRestitution(0.45)
+                        .setMass(mass);
                     world.createCollider(colliderDesc, body);
 
                     dynamicObstacles.push({ mesh, body });
@@ -353,7 +390,7 @@ function ThreeScene() {
                 addObstacle(9, -0.8, 1.4, 1.4, 1.4, 12, 0xe08b4c, 2.1);
                 addObstacle(9,  0.8, 1.4, 1.4, 1.4, 12, 0xe08b4c, 2.1);
 
-                // More scatter crates around the arena
+                // Scatter crates around the terrain hills
                 addObstacle(14,  -5, 1.5, 1.5, 1.5, 15, 0x8a5d3b);
                 addObstacle(14,   5, 1.5, 1.5, 1.5, 15, 0x8a5d3b);
                 addObstacle(-8,  -6, 1.5, 1.5, 1.5, 15, 0x5a6375);
@@ -368,7 +405,7 @@ function ThreeScene() {
                         carScene = gltf.scene;
 
                         // Spawn visually at initial physics body position
-                        carScene.position.set(0, 5, 0);
+                        carScene.position.set(0, initialSpawnY, 0);
 
                         // Shadows
                         carScene.traverse((child) => {
@@ -417,24 +454,25 @@ function ThreeScene() {
                     const rot = carBody.rotation();
                     const carQuat = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
 
-                    // Car local axes (+X is forward, +Z is right)
+                    // Car local axes (+X is forward, +Z is right, +Y is up)
                     const forward = new THREE.Vector3(1, 0, 0).applyQuaternion(carQuat);
                     const lateral = new THREE.Vector3(0, 0, 1).applyQuaternion(carQuat);
+                    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(carQuat);
 
                     const linvel = carBody.linvel();
-                    const currentVel = new THREE.Vector3(linvel.x, 0, linvel.z);
+                    const currentVel = new THREE.Vector3(linvel.x, linvel.y, linvel.z);
 
                     // Calculate speed along forward and sideways directions
                     const forwardSpeed = currentVel.dot(forward);
                     const lateralSpeed = currentVel.dot(lateral);
                     const absSpeed = Math.abs(forwardSpeed);
 
-                    // 1. Progressive Lateral Tyre Grip (Holds road, prevents ice-sliding)
+                    // 1. Progressive Lateral Tyre Grip (Prevents sliding down slopes)
                     if (Math.abs(lateralSpeed) > 0.01) {
                         const gripImpulse = -lateralSpeed * CAR_MASS * Math.min(10.0 * delta, 0.85);
                         carBody.applyImpulse({
                             x: lateral.x * gripImpulse,
-                            y: 0,
+                            y: lateral.y * gripImpulse,
                             z: lateral.z * gripImpulse
                         }, true);
                     }
@@ -451,14 +489,14 @@ function ThreeScene() {
                             const brakeForce = BRAKE_FORCE * 1.5 * delta;
                             carBody.applyImpulse({
                                 x: forward.x * brakeForce,
-                                y: 0,
+                                y: forward.y * brakeForce,
                                 z: forward.z * brakeForce
                             }, true);
                         } else if (forwardSpeed < targetMaxSpeed) {
                             const force = currentAccel * delta;
                             carBody.applyImpulse({
                                 x: forward.x * force,
-                                y: 0,
+                                y: forward.y * force,
                                 z: forward.z * force
                             }, true);
                         }
@@ -468,7 +506,7 @@ function ThreeScene() {
                             const brake = Math.min(BRAKE_FORCE * delta, forwardSpeed * CAR_MASS * 0.95);
                             carBody.applyImpulse({
                                 x: -forward.x * brake,
-                                y: 0,
+                                y: -forward.y * brake,
                                 z: -forward.z * brake
                             }, true);
                         } else if (forwardSpeed > -MAX_REVERSE_SPEED) {
@@ -476,7 +514,7 @@ function ThreeScene() {
                             const force = REVERSE_FORCE * delta;
                             carBody.applyImpulse({
                                 x: -forward.x * force,
-                                y: 0,
+                                y: -forward.y * force,
                                 z: -forward.z * force
                             }, true);
                         }
@@ -487,47 +525,70 @@ function ThreeScene() {
                             const decelDir = forwardSpeed > 0 ? -1 : 1;
                             carBody.applyImpulse({
                                 x: forward.x * decel * decelDir,
-                                y: 0,
+                                y: forward.y * decel * decelDir,
                                 z: forward.z * decel * decelDir
                             }, true);
                         } else {
-                            // Smoothly settle car to rest when nearly stopped (< 0.18 km/h) to prevent micro-drift
+                            // Smoothly settle car to rest when nearly stopped to prevent micro-drift
                             const currentLinvel = carBody.linvel();
                             carBody.setLinvel({ x: 0, y: currentLinvel.y, z: 0 }, true);
                         }
                     }
 
-                    // 3. Realistic Speed-Sensitive Ackermann Steering (Smooth, stable & controllable)
+                    // 3. Realistic Speed-Sensitive Ackermann Steering
                     const speedKmh = absSpeed * 3.6;
 
                     // Speed-sensitive steering factor (nimble at slow speeds, calm & stable at high speeds)
                     const speedFactor = THREE.MathUtils.clamp(1.0 - (speedKmh / 110) * 0.78, 0.20, 1.0);
-                    const maxSteerAngle = 0.30 * speedFactor; // ~21.7° at low speed, down to ~4.3° at Nitro speed
+                    const maxSteerAngle = 0.30 * speedFactor;
 
                     let targetSteer = 0;
                     if (keys.a) targetSteer = maxSteerAngle;
                     if (keys.d) targetSteer = -maxSteerAngle;
 
-                    // Smooth progressive steering wheel turn (0.08 turn-in prevents twitching, 0.18 auto-centers)
+                    // Smooth progressive steering wheel turn
                     const steerLerpSpeed = (targetSteer === 0) ? 0.18 : 0.08;
                     currentSteerAngle = THREE.MathUtils.lerp(currentSteerAngle, targetSteer, steerLerpSpeed);
 
                     if (steerFL) steerFL.rotation.y = currentSteerAngle;
                     if (steerFR) steerFR.rotation.y = currentSteerAngle;
 
-                    // Physics Ackermann turning: Yaw Rate omega = (v / L) * tan(delta)
-                    if (absSpeed > 0.15) {
-                        // Max yaw rate cap prevents sudden snap-oversteer or spinouts at high speed
-                        const maxYawRate = THREE.MathUtils.lerp(2.2, 1.0, THREE.MathUtils.clamp(speedKmh / 90, 0, 1));
-                        let targetYawRate = (forwardSpeed / WHEELBASE) * Math.tan(currentSteerAngle);
-                        targetYawRate = THREE.MathUtils.clamp(targetYawRate, -maxYawRate, maxYawRate);
+                    // Turning with terrain-relative angular velocity
+                    const angvel = carBody.angvel();
+                    const currentAngVec = new THREE.Vector3(angvel.x, angvel.y, angvel.z);
+                    const currentPitch = currentAngVec.dot(lateral);
+                    const currentRoll = currentAngVec.dot(forward);
+                    const currentYaw = currentAngVec.dot(up);
 
-                        const currentAngvel = carBody.angvel();
-                        const newYaw = THREE.MathUtils.lerp(currentAngvel.y, targetYawRate, 0.14);
-                        carBody.setAngvel({ x: 0, y: newYaw, z: 0 }, true);
-                    } else {
-                        // Stationary: Car does NOT spin in place
-                        carBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
+                    let targetYawRate = 0;
+                    if (absSpeed > 0.15) {
+                        const maxYawRate = THREE.MathUtils.lerp(2.2, 1.0, THREE.MathUtils.clamp(speedKmh / 90, 0, 1));
+                        targetYawRate = (forwardSpeed / WHEELBASE) * Math.tan(currentSteerAngle);
+                        targetYawRate = THREE.MathUtils.clamp(targetYawRate, -maxYawRate, maxYawRate);
+                    }
+                    const newYaw = THREE.MathUtils.lerp(currentYaw, targetYawRate, 0.2);
+
+                    // Preserve natural terrain pitch/roll while gently damping excessive roll/pitch
+                    const newPitch = currentPitch * 0.94;
+                    const newRoll = currentRoll * 0.88;
+
+                    const newAngVec = new THREE.Vector3()
+                        .addScaledVector(up, newYaw)
+                        .addScaledVector(lateral, newPitch)
+                        .addScaledVector(forward, newRoll);
+
+                    carBody.setAngvel(newAngVec, true);
+
+                    // Upright stabilization spring (keeps car naturally aligned to terrain normal without flipping)
+                    const uprightAngle = Math.acos(THREE.MathUtils.clamp(up.y, -1, 1));
+                    if (uprightAngle > 0.03) {
+                        const correctionAxis = new THREE.Vector3(0, 1, 0).cross(up).normalize();
+                        const torque = uprightAngle * CAR_MASS * 8.0 * delta;
+                        carBody.applyTorqueImpulse({
+                            x: -correctionAxis.x * torque,
+                            y: -correctionAxis.y * torque,
+                            z: -correctionAxis.z * torque
+                        }, true);
                     }
 
                     // 4. Physically Accurate Wheel Spin (Roll angle matched to exact distance moved)
@@ -543,7 +604,7 @@ function ThreeScene() {
                         camera.updateProjectionMatrix();
                     }
 
-                    // Live HUD Speedometer & Nitro updates (Zero React re-render overhead)
+                    // Live HUD Speedometer & Nitro updates
                     if (speedRef.current) {
                         speedRef.current.innerText = `${Math.round(speedKmh)}`;
                     }
@@ -590,12 +651,12 @@ function ThreeScene() {
 
                     const carCenter = new THREE.Vector3(translation.x, translation.y + 0.85, translation.z);
 
-                    // Dynamic Shadow Follow: Keep high-res shadow projection centered on car/camera proximity (like AAA games)
+                    // Dynamic Shadow Follow: Keep high-res shadow projection centered on car
                     directionalLight.target.position.copy(carCenter);
                     directionalLight.position.copy(carCenter).add(sunOffset);
                     directionalLight.target.updateMatrixWorld();
 
-                    // 1. Rigidly translate camera and look-target by car displacement so camera NEVER falls behind!
+                    // 1. Rigidly translate camera and look-target by car displacement so camera NEVER falls behind
                     if (!prevCarCenter) {
                         prevCarCenter = carCenter.clone();
                     }
@@ -604,9 +665,10 @@ function ThreeScene() {
                     camera.position.add(carDelta);
                     currentLookTarget.add(carDelta);
 
-                    // Safety net: Auto-respawn car if it somehow drops below ground level
-                    if (carBody.translation().y < -2.0) {
-                        carBody.setTranslation({ x: 0, y: 0.15, z: 0 }, true);
+                    // Safety net: Auto-respawn car if it drops far below terrain or leaves bounds
+                    if (translation.y < -30.0 || Math.abs(translation.x) > 115 || Math.abs(translation.z) > 115) {
+                        const respawnY = getTerrainHeight(0, 0) + 0.45;
+                        carBody.setTranslation({ x: 0, y: respawnY, z: 0 }, true);
                         carBody.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
                         carBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
                         carBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
@@ -618,12 +680,10 @@ function ThreeScene() {
 
                     // Determine if car is driving vs stationary/not moving
                     const linvel = carBody.linvel();
-                    const currentVel = new THREE.Vector3(linvel.x, 0, linvel.z);
+                    const currentVel = new THREE.Vector3(linvel.x, linvel.y, linvel.z);
                     const forwardSpeed = currentVel.dot(forward);
                     const currentSpeed = currentVel.length();
 
-                    // Only actual driving throttles (W or S) or moving speed activate driving camera!
-                    // Pressing A and D alone when stationary NEVER triggers driving mode, so camera stays 100% still!
                     const isThrottleActive = keys.w || keys.s;
                     const isActuallyMoving = currentSpeed > 0.35;
 
@@ -635,8 +695,6 @@ function ThreeScene() {
                     }
 
                     // Forward vs Reverse camera mode:
-                    // When moving backward with S: camera moves in front of the car facing it!
-                    // When driving forward: camera stays behind the car facing it!
                     let targetCamDir;
                     if (keys.s && forwardSpeed < -0.15) {
                         targetCamDir = 1.0;
@@ -648,7 +706,6 @@ function ThreeScene() {
                         targetCamDir = currentCamDir > 0 ? 1.0 : -1.0;
                     }
 
-                    // Smooth transition between behind (-1.0) and in front (+1.0)
                     currentCamDir = THREE.MathUtils.lerp(currentCamDir, targetCamDir, 1.0 - Math.exp(-6.0 * delta));
 
                     const isBoosting = keys.shift && keys.w;
@@ -672,45 +729,42 @@ function ThreeScene() {
                         }
                     }
 
-                    // Follow distance & height: smoothly interpolate so Nitro boost never jerks camera backwards
+                    // Follow distance & height
                     const targetDist = isBoosting ? 8.2 : 7.0;
                     const targetHeight = isBoosting ? 2.3 : 2.1;
                     const zoomLerpSpeed = 1.0 - Math.exp(-2.5 * delta);
                     currentFollowDist = THREE.MathUtils.lerp(currentFollowDist, targetDist, zoomLerpSpeed);
                     currentFollowHeight = THREE.MathUtils.lerp(currentFollowHeight, targetHeight, zoomLerpSpeed);
 
-                    // Compute smooth camera position:
-                    // In forward: directly behind the car (-forward * currentFollowDist)
-                    // In reverse: directly in front of the car (+forward * currentFollowDist)
-                    // During transition: curves smoothly around the side of the car
-                    const lateral = new THREE.Vector3(-forward.z, 0, forward.x);
+                    const lateralCam = new THREE.Vector3(-forward.z, 0, forward.x);
                     const arcSide = (1.0 - currentCamDir * currentCamDir) * (currentFollowDist * 0.7);
 
                     const desiredCamPos = new THREE.Vector3()
                         .copy(carCenter)
                         .addScaledVector(forward, currentCamDir * currentFollowDist)
-                        .addScaledVector(lateral, arcSide);
+                        .addScaledVector(lateralCam, arcSide);
                     desiredCamPos.y = carCenter.y + (currentFollowHeight - 0.85);
-                    if (desiredCamPos.y < 1.15) desiredCamPos.y = 1.15;
 
-                    // The camera ALWAYS looks directly at the car (rock solid center of screen)
+                    // Prevent camera from clipping through terrain hills
+                    const camTerrainH = getTerrainHeight(desiredCamPos.x, desiredCamPos.z);
+                    if (desiredCamPos.y < camTerrainH + 0.8) {
+                        desiredCamPos.y = camTerrainH + 0.8;
+                    }
+
                     const carTargetLook = new THREE.Vector3(carCenter.x, carCenter.y + 0.55, carCenter.z);
 
                     if (cameraModeRef.current === 'free_orbit') {
-                        // User chose free orbit mode (camera still follows vehicle translation)
                         controls.enabled = true;
                         controls.target.copy(carCenter);
                         controls.update();
                         currentLookTarget.copy(controls.target);
                     } else if (isDrivingState) {
-                        // Driving: Follow camera takes over smoothly
                         controls.enabled = false;
 
-                        // Follow spring: smooth and locked to the car's motion
                         const followSpeed = 1.0 - Math.exp(-12.0 * delta);
                         camera.position.lerp(desiredCamPos, followSpeed);
 
-                        // Strict distance clamp: guarantee camera keeps up with Nitro speed smoothly
+                        // Strict distance clamp
                         const toCamNow = new THREE.Vector3().subVectors(camera.position, carCenter);
                         toCamNow.y = 0;
                         const currentDist = toCamNow.length();
@@ -721,14 +775,11 @@ function ThreeScene() {
                             camera.position.z = carCenter.z + toCamNow.z;
                         }
 
-                        // Look directly at the car (faces the car always, no wild steering pans)
                         currentLookTarget.lerp(carTargetLook, 1.0 - Math.exp(-14.0 * delta));
                         camera.lookAt(currentLookTarget);
-
                         controls.target.copy(carCenter);
 
                     } else {
-                        // Stopped / stationary state
                         controls.enabled = true;
                         controls.target.copy(carCenter);
 
@@ -736,7 +787,6 @@ function ThreeScene() {
                             controls.update();
                             currentLookTarget.copy(controls.target);
                         } else {
-                            // Settle camera to rest position when stopped
                             const settleLerp = 1.0 - Math.exp(-6.0 * delta);
                             camera.position.lerp(desiredCamPos, settleLerp);
                             currentLookTarget.lerp(carTargetLook, settleLerp);
@@ -791,9 +841,8 @@ function ThreeScene() {
             window.removeEventListener('keyup', handleKeyUp);
             window.removeEventListener('blur', handleBlur);
 
-            groundGeometry.dispose();
-            groundMaterial.dispose();
-            grid.dispose();
+            geometry.dispose();
+            material.dispose();
             debugGeometry.dispose();
             debugMaterial.dispose();
             if (directionalLight.shadow.map) {
@@ -813,6 +862,69 @@ function ThreeScene() {
     return (
         <div className="fixed inset-0 w-full h-full overflow-hidden select-none font-sans">
             <div ref={mountRef} className="w-full h-full" />
+
+            {/* Dashboard / Controls HUD */}
+            <div className="absolute top-4 left-4 z-10 flex flex-col gap-2 pointer-events-none select-none">
+                <div className="bg-neutral-900/90 backdrop-blur-md border border-neutral-700/60 rounded-2xl p-4 shadow-2xl text-white font-mono text-xs space-y-3 min-w-[260px]">
+                    {/* Header with Title and Live Speed */}
+                    <div className="flex items-center justify-between gap-4 pb-2 border-b border-neutral-700/80">
+                        <div className="flex items-center gap-2">
+                            <span className="text-lg">🏎️</span>
+                            <div>
+                                <div className="text-white font-black tracking-wider text-xs">CAR DASH</div>
+                                <div className="text-[10px] text-emerald-400 font-semibold">IRREGULAR TERRAIN</div>
+                            </div>
+                        </div>
+                        {/* Live Speedometer */}
+                        <div className="flex items-baseline gap-1 bg-black/60 px-3 py-1 rounded-lg border border-neutral-800">
+                            <span ref={speedRef} className="text-amber-400 font-black text-xl leading-none">0</span>
+                            <span className="text-[10px] text-neutral-400 font-bold">KM/H</span>
+                        </div>
+                    </div>
+
+                    {/* Status Badges */}
+                    <div className="flex items-center justify-between gap-2 pt-0.5">
+                        <div ref={gearRef} className="text-xs font-mono font-bold text-neutral-400">NEUTRAL</div>
+                        <div ref={nitroBadgeRef} className="text-xs font-bold px-2 py-0.5 rounded-md font-mono text-neutral-400 bg-white/5">HOLD SHIFT</div>
+                    </div>
+
+                    {/* Key controls */}
+                    <div className="space-y-1.5 pt-1 text-[11px]">
+                        <div className="flex justify-between gap-4 text-neutral-300">
+                            <span className="text-neutral-400">Drive / Reverse:</span>
+                            <span className="font-bold text-white">W / S (or ↑ / ↓)</span>
+                        </div>
+                        <div className="flex justify-between gap-4 text-neutral-300">
+                            <span className="text-neutral-400">Steer:</span>
+                            <span className="font-bold text-white">A / D (or ← / →)</span>
+                        </div>
+                        <div className="flex justify-between gap-4 text-neutral-300">
+                            <span className="text-neutral-400">Turbo Nitro:</span>
+                            <span className="font-bold text-amber-400">SHIFT + W</span>
+                        </div>
+                        <div className="flex justify-between gap-4 text-neutral-300">
+                            <span className="text-neutral-400">Reset Drop:</span>
+                            <span className="font-bold text-cyan-400">R</span>
+                        </div>
+                    </div>
+
+                    {/* Interactive Toggle Buttons */}
+                    <div className="flex gap-2 pt-2 border-t border-neutral-800/80">
+                        <button
+                            onClick={() => setDebugVisible(v => !v)}
+                            className="pointer-events-auto flex-1 py-1 rounded-lg text-[10px] font-bold cursor-pointer transition-colors bg-white/5 hover:bg-white/10 text-neutral-300 border border-white/10"
+                        >
+                            {debugVisible ? 'COLLIDERS: ON [C]' : 'COLLIDERS: OFF [C]'}
+                        </button>
+                        <button
+                            onClick={() => setCameraMode(prev => prev === 'auto' ? 'free_orbit' : 'auto')}
+                            className="pointer-events-auto flex-1 py-1 rounded-lg text-[10px] font-bold cursor-pointer transition-colors bg-white/5 hover:bg-white/10 text-neutral-300 border border-white/10"
+                        >
+                            <span ref={cameraBadgeRef}>CAMERA [V]</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
     );
 }
