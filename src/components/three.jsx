@@ -30,14 +30,14 @@ function ThreeScene() {
             elevation: {
                 value: DEFAULT_GROUND_CONFIG.elevation,
                 min: 0.0,
-                max: 12.0,
-                step: 0.1,
+                max: 80.0,
+                step: 1.0,
                 label: 'Height / Elevation'
             },
             frequency: {
                 value: DEFAULT_GROUND_CONFIG.frequency,
                 min: 0.003,
-                max: 0.045,
+                max: 0.1,
                 step: 0.001,
                 label: 'Frequency / Scale'
             },
@@ -57,8 +57,8 @@ function ThreeScene() {
             },
             lacunarity: {
                 value: DEFAULT_GROUND_CONFIG.lacunarity,
-                min: 1.5,
-                max: 3.2,
+                min: 0.25,
+                max: 2.0,
                 step: 0.1,
                 label: 'Lacunarity'
             },
@@ -66,12 +66,12 @@ function ThreeScene() {
                 value: DEFAULT_GROUND_CONFIG.spawnFlatRadius,
                 min: 0.0,
                 max: 30.0,
-                step: 1.0,
+                step: 5.0,
                 label: 'Spawn Plateau (m)'
             },
             segments: {
                 value: DEFAULT_GROUND_CONFIG.segments,
-                min: 50,
+                min: 10,
                 max: 200,
                 step: 10,
                 label: 'Mesh Subdivisions'
@@ -509,7 +509,8 @@ function ThreeScene() {
                             .setFriction(0.05)
                             .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min)
                             .setRestitution(0.0)
-                            .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min);
+                            .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min)
+                            .setContactSkin(0.015);
 
                         const col = world.createCollider(wheelColliderDesc, carBody);
                         activeWheelColliders.push(col);
@@ -1081,76 +1082,9 @@ function ThreeScene() {
             {/* Leva GUI Control Panel Config */}
             <Leva
                 titleBar={{ title: 'Ground Shader & Perlin Noise' }}
-                collapsed={false}
+                collapsed={true}
                 oneLineLabels={false}
             />
-
-            {/* Speedometer & Car Telemetry HUD */}
-            <div className="absolute top-6 left-6 z-10 flex flex-col gap-2 pointer-events-none">
-                <div className="flex items-center gap-3 bg-neutral-900/80 backdrop-blur-md border border-neutral-700/60 rounded-xl px-4 py-2.5 shadow-xl">
-                    <div className="flex flex-col">
-                        <span className="text-[10px] font-mono tracking-widest text-neutral-400 uppercase">Speed</span>
-                        <div className="flex items-baseline gap-1">
-                            <span ref={speedRef} className="text-3xl font-black font-mono text-white tracking-tight">0</span>
-                            <span className="text-xs font-mono text-neutral-400">KM/H</span>
-                        </div>
-                    </div>
-
-                    <div className="w-[1px] h-8 bg-neutral-700/60 mx-1" />
-
-                    <div className="flex flex-col">
-                        <span className="text-[10px] font-mono tracking-widest text-neutral-400 uppercase">Transmission</span>
-                        <span ref={gearRef} className="text-xs font-mono font-bold text-neutral-400">NEUTRAL</span>
-                    </div>
-
-                    <div className="w-[1px] h-8 bg-neutral-700/60 mx-1" />
-
-                    <div className="flex flex-col">
-                        <span className="text-[10px] font-mono tracking-widest text-neutral-400 uppercase">Camera</span>
-                        <span ref={cameraBadgeRef} className="text-xs font-mono font-bold text-emerald-400">ORBIT READY 🔄</span>
-                    </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                    <span ref={nitroBadgeRef} className="text-xs font-bold px-2 py-0.5 rounded-md font-mono text-neutral-400 bg-white/5 border border-white/10">
-                        HOLD SHIFT
-                    </span>
-                    <span className="text-[11px] font-mono text-neutral-400 bg-neutral-900/80 px-2.5 py-0.5 rounded-md border border-neutral-800">
-                        Smooth Perlin Ground Active ✨
-                    </span>
-                </div>
-            </div>
-
-            {/* Controls Guide Overlay */}
-            <div className="absolute bottom-6 left-6 z-10 pointer-events-none bg-neutral-900/70 backdrop-blur-sm border border-neutral-800 rounded-lg px-3.5 py-2 text-[11px] font-mono text-neutral-300 flex items-center gap-3 shadow-lg">
-                <div className="flex items-center gap-1">
-                    <kbd className="px-1.5 py-0.5 bg-neutral-800 border border-neutral-700 rounded text-amber-400 font-bold">W</kbd>
-                    <kbd className="px-1.5 py-0.5 bg-neutral-800 border border-neutral-700 rounded text-amber-400 font-bold">A</kbd>
-                    <kbd className="px-1.5 py-0.5 bg-neutral-800 border border-neutral-700 rounded text-amber-400 font-bold">S</kbd>
-                    <kbd className="px-1.5 py-0.5 bg-neutral-800 border border-neutral-700 rounded text-amber-400 font-bold">D</kbd>
-                    <span className="text-neutral-400 ml-1">Drive</span>
-                </div>
-                <span className="text-neutral-600">|</span>
-                <div className="flex items-center gap-1">
-                    <kbd className="px-1.5 py-0.5 bg-neutral-800 border border-neutral-700 rounded text-cyan-400 font-bold">Shift</kbd>
-                    <span className="text-neutral-400 ml-1">Turbo</span>
-                </div>
-                <span className="text-neutral-600">|</span>
-                <div className="flex items-center gap-1">
-                    <kbd className="px-1.5 py-0.5 bg-neutral-800 border border-neutral-700 rounded text-white font-bold">R</kbd>
-                    <span className="text-neutral-400 ml-1">Respawn</span>
-                </div>
-                <span className="text-neutral-600">|</span>
-                <div className="flex items-center gap-1">
-                    <kbd className="px-1.5 py-0.5 bg-neutral-800 border border-neutral-700 rounded text-white font-bold">C</kbd>
-                    <span className="text-neutral-400 ml-1">Colliders</span>
-                </div>
-                <span className="text-neutral-600">|</span>
-                <div className="flex items-center gap-1">
-                    <kbd className="px-1.5 py-0.5 bg-neutral-800 border border-neutral-700 rounded text-white font-bold">V</kbd>
-                    <span className="text-neutral-400 ml-1">Camera</span>
-                </div>
-            </div>
         </div>
     );
 }

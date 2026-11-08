@@ -106,18 +106,18 @@ export function getTerrainNormal(x, z, params = DEFAULT_GROUND_CONFIG, eps = 0.3
 // -------------------------------------------------------------
 
 export const DEFAULT_GROUND_CONFIG = {
-    elevation: 10.00,         // Height amplitude of rolling hills
-    frequency: 0.03,       // Noise wavelength scale (smooth large curves)
+    elevation: 14.00,         // Height amplitude of rolling hills (smooth gentle slopes)
+    frequency: 0.012,       // Noise wavelength scale (smooth large curves)
     octaves: 3,             // Octave layering (1 to 5)
-    persistence: 0.70,      // Roughness factor
-    lacunarity: 2.0,        // Frequency multiplier per octave
-    spawnFlatRadius: 12.0,  // Level ground radius at (0, 0)
+    persistence: 0.35,      // Natural roughness (prevents acute 60° crease jumps)
+    lacunarity: 2.00,        // Frequency multiplier per octave
+    spawnFlatRadius: 25.0,  // Level ground radius at (0, 0)
     grassColor: '#9da8ce',  // Lush grass color
     dirtColor: '#241b12',   // Valley earth color
     rockColor: '#52565e',   // Steep slope cliff rock color
     wireframe: false,       // Wireframe debug toggle
-    size: 250,              // World terrain dimension in meters (240x240m)
-    segments: 100,          // Mesh grid resolution (optimized for silky smooth 60+ FPS performance)
+    size: 250,              // World terrain dimension in meters (250x250m)
+    segments: 160,          // Mesh grid resolution for smooth cross-section transitions
 };
 
 // -------------------------------------------------------------
@@ -414,7 +414,9 @@ export class Ground {
         const vertices = Float32Array.from(this.geometry.attributes.position.array);
         const indices = Uint32Array.from(this.geometry.index.array);
 
-        const colliderDesc = this.RAPIER.ColliderDesc.trimesh(vertices, indices)
+        // Enable FIX_INTERNAL_EDGES (flag 144) to eliminate ghost bumps & jitter at triangle cross-sections
+        const trimeshFlags = this.RAPIER.TriMeshFlags?.FIX_INTERNAL_EDGES ?? 144;
+        const colliderDesc = this.RAPIER.ColliderDesc.trimesh(vertices, indices, trimeshFlags)
             .setRestitution(0.0)
             .setRestitutionCombineRule(this.RAPIER.CoefficientCombineRule.Min)
             .setFriction(0.85);
