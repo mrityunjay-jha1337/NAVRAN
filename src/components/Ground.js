@@ -1,18 +1,20 @@
 import * as THREE from 'three';
 
 // -------------------------------------------------------------
-// 1. Deterministic Math & Perlin Noise (Identical in JS & GLSL)
+// 1. Deterministic Math & Seeded Perlin Noise (Identical in JS & GLSL)
 // -------------------------------------------------------------
 
 function fract(x) {
     return x - Math.floor(x);
 }
 
-// Dave Hoskins Hash without Sine (CPU implementation)
-function hash2(px, py) {
-    let p3x = fract(px * 0.1031);
-    let p3y = fract(py * 0.1031);
-    let p3z = fract(px * 0.1031);
+// Dave Hoskins Hash without Sine with Seed Offset (CPU implementation)
+function hash2(px, py, seed = 1337.0) {
+    const sx = seed * 0.13371;
+    const sy = seed * 0.37139;
+    let p3x = fract((px + sx) * 0.1031);
+    let p3y = fract((py + sy) * 0.1031);
+    let p3z = fract((px + sx) * 0.1031);
     const d = p3x * (p3y + 33.33) + p3y * (p3z + 33.33) + p3z * (p3x + 33.33);
     p3x += d;
     p3y += d;
@@ -21,8 +23,8 @@ function hash2(px, py) {
     return [Math.cos(angle), Math.sin(angle)];
 }
 
-// 2D Gradient Perlin Noise with Quintic Hermite C2 Interpolation
-export function perlin2D(x, y) {
+// 2D Gradient Perlin Noise with Quintic Hermite C2 Interpolation & Seed
+export function perlin2D(x, y, seed = 1337.0) {
     const ix = Math.floor(x);
     const iy = Math.floor(y);
     const fx = x - ix;
@@ -32,10 +34,10 @@ export function perlin2D(x, y) {
     const ux = fx * fx * fx * (fx * (fx * 6.0 - 15.0) + 10.0);
     const uy = fy * fy * fy * (fy * (fy * 6.0 - 15.0) + 10.0);
 
-    const [g00x, g00y] = hash2(ix, iy);
-    const [g10x, g10y] = hash2(ix + 1, iy);
-    const [g01x, g01y] = hash2(ix, iy + 1);
-    const [g11x, g11y] = hash2(ix + 1, iy + 1);
+    const [g00x, g00y] = hash2(ix, iy, seed);
+    const [g10x, g10y] = hash2(ix + 1, iy, seed);
+    const [g01x, g01y] = hash2(ix, iy + 1, seed);
+    const [g11x, g11y] = hash2(ix + 1, iy + 1, seed);
 
     const d00 = g00x * fx + g00y * fy;
     const d10 = g10x * (fx - 1.0) + g10y * fy;
@@ -47,8 +49,8 @@ export function perlin2D(x, y) {
     return x0 + uy * (x1 - x0);
 }
 
-// Fractal Brownian Motion (FBM) with normalized amplitude
-export function fbm2D(x, y, octaves = 3, lacunarity = 2.0, persistence = 0.35) {
+// Fractal Brownian Motion (FBM) with normalized amplitude & Seed
+export function fbm2D(x, y, octaves = 3, lacunarity = 2.0, persistence = 0.35, seed = 1337.0) {
     let sum = 0.0;
     let amp = 1.0;
     let freq = 1.0;
@@ -56,7 +58,7 @@ export function fbm2D(x, y, octaves = 3, lacunarity = 2.0, persistence = 0.35) {
 
     for (let i = 0; i < 5; i++) {
         if (i >= octaves) break;
-        sum += perlin2D(x * freq, y * freq) * amp;
+        sum += perlin2D(x * freq, y * freq, seed + i * 17.13) * amp;
         maxAmp += amp;
         freq *= lacunarity;
         amp *= persistence;
@@ -65,19 +67,20 @@ export function fbm2D(x, y, octaves = 3, lacunarity = 2.0, persistence = 0.35) {
     return maxAmp > 0.0 ? sum / maxAmp : 0.0;
 }
 
-// Full mathematical terrain elevation function (matching shader 100%)
+// Full mathematical terrain elevation function (matching shader 100% anywhere in infinite space)
 export function getTerrainElevation(x, z, params = DEFAULT_GROUND_CONFIG) {
-    const elevation = params.elevation ?? 3.8;
-    const frequency = params.frequency ?? 0.014;
+    const elevation = params.elevation ?? 14.0;
+    const frequency = params.frequency ?? 0.012;
     const octaves = params.octaves ?? 3;
     const persistence = params.persistence ?? 0.35;
     const lacunarity = params.lacunarity ?? 2.0;
-    const spawnFlatRadius = params.spawnFlatRadius ?? 12.0;
+    const spawnFlatRadius = params.spawnFlatRadius ?? 25.0;
+    const seed = params.seed ?? 1337.0;
 
-    const noiseVal = fbm2D(x * frequency, z * frequency, octaves, lacunarity, persistence);
+    const noiseVal = fbm2D(x * frequency, z * frequency, octaves, lacunarity, persistence, seed);
     let h = noiseVal * elevation;
 
-    // Smooth level plateau around origin (0, 0) for safe car spawning
+    // Smooth level plateau around origin (0, 0) for safe initial car spawning
     if (spawnFlatRadius > 0.0) {
         const dist = Math.hypot(x, z);
         const rInner = Math.max(0.0, spawnFlatRadius - 4.0);
@@ -102,37 +105,34 @@ export function getTerrainNormal(x, z, params = DEFAULT_GROUND_CONFIG, eps = 0.3
 }
 
 // -------------------------------------------------------------
-// 2. Default Configuration
+// 2. Default Configuration for Infinite Procedural Generation
 // -------------------------------------------------------------
 
 export const DEFAULT_GROUND_CONFIG = {
-    elevation: 14.00,         // Height amplitude of rolling hills (smooth gentle slopes)
-    frequency: 0.012,       // Noise wavelength scale (smooth large curves)
-    octaves: 3,             // Octave layering (1 to 5)
-    persistence: 0.35,      // Natural roughness (prevents acute 60° crease jumps)
-    lacunarity: 2.00,        // Frequency multiplier per octave
-    spawnFlatRadius: 25.0,  // Level ground radius at (0, 0)
-    grassColor: '#9da8ce',  // Lush grass color
-    dirtColor: '#241b12',   // Valley earth color
-    rockColor: '#52565e',   // Steep slope cliff rock color
-    wireframe: false,       // Wireframe debug toggle
-    size: 250,              // World terrain dimension in meters (250x250m)
-    segments: 160,          // Mesh grid resolution for smooth cross-section transitions
+    seed: 1170,              // World seed for procedural generation
+    chunkSize: 40,           // Dimension of each chunk in meters (40x40m)
+    segmentsPerChunk: 24,    // Geometry grid resolution per chunk
+    renderDistance: 4,       // Visual chunk radius around car (4 chunks = ~160m radius)
+    physicsRadius: 2,        // Physics collision chunk radius (2 chunks = 5x5 grid = ~200m around car)
+    elevation: 25.00,        // Height amplitude of rolling hills
+    frequency: 0.025,        // Noise wavelength scale
+    octaves: 4,              // Octave layering (1 to 5)
+    persistence: 0.70,       // Roughness
+    lacunarity: 1.00,        // Frequency multiplier
+    spawnFlatRadius: 100.0,   // Level ground plateau around (0, 0)
+    wireframeColor: '#788187', // Electric blue wireframe
+    wireframe: true,         // Wireframe mode always active
+    fogColor: '#181a1f',     // Distance fog color matching scene background
+    fogNear: 45.0,           // Distance fog start in meters
+    fogFar: 150.0,           // Distance fog fully opaque in meters
 };
 
 // -------------------------------------------------------------
-// 3. Robust, Self-Contained GLSL Shaders (Vertex + Fragment)
+// 3. Robust GLSL Shaders (Vertex + Fragment with Seed Support)
 // -------------------------------------------------------------
 
 const vertexShader = /* glsl */ `
 precision highp float;
-
-uniform float uElevation;
-uniform float uFrequency;
-uniform int uOctaves;
-uniform float uPersistence;
-uniform float uLacunarity;
-uniform float uSpawnFlatRadius;
 
 varying vec3 vWorldPos;
 varying vec3 vNormalVec;
@@ -140,91 +140,19 @@ varying float vElevation;
 varying float vSlope;
 varying vec2 vUvCoord;
 
-// Dave Hoskins Hash without Sine (Deterministic GLSL hash)
-vec2 hash2(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    float angle = fract((p3.x + p3.y) * p3.z) * 6.283185307179586;
-    return vec2(cos(angle), sin(angle));
-}
-
-float perlin2D(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-
-    // Quintic Hermite curve: 6t^5 - 15t^4 + 10t^3
-    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-
-    vec2 g00 = hash2(i);
-    vec2 g10 = hash2(i + vec2(1.0, 0.0));
-    vec2 g01 = hash2(i + vec2(0.0, 1.0));
-    vec2 g11 = hash2(i + vec2(1.0, 1.0));
-
-    float d00 = dot(g00, f);
-    float d10 = dot(g10, f - vec2(1.0, 0.0));
-    float d01 = dot(g01, f - vec2(0.0, 1.0));
-    float d11 = dot(g11, f - vec2(1.0, 1.0));
-
-    float x0 = mix(d00, d10, u.x);
-    float x1 = mix(d01, d11, u.x);
-    return mix(x0, x1, u.y);
-}
-
-float fbm2D(vec2 p, int octaves, float lacunarity, float persistence) {
-    float sum = 0.0;
-    float amp = 1.0;
-    float freq = 1.0;
-    float maxAmp = 0.0;
-
-    for (int i = 0; i < 5; i++) {
-        if (i >= octaves) break;
-        sum += perlin2D(p * freq) * amp;
-        maxAmp += amp;
-        freq *= lacunarity;
-        amp *= persistence;
-    }
-
-    return maxAmp > 0.0 ? sum / maxAmp : 0.0;
-}
-
-float getTerrainHeight(vec2 xz, float elevation, float frequency, int octaves, float persistence, float lacunarity, float spawnFlatRadius) {
-    float noiseVal = fbm2D(xz * frequency, octaves, lacunarity, persistence);
-    float h = noiseVal * elevation;
-
-    if (spawnFlatRadius > 0.0) {
-        float dist = length(xz);
-        float rInner = max(0.0, spawnFlatRadius - 4.0);
-        float rOuter = spawnFlatRadius + 8.0;
-        float t = clamp((dist - rInner) / (rOuter - rInner), 0.0, 1.0);
-        float blend = t * t * (3.0 - 2.0 * t);
-        h *= blend;
-    }
-
-    return h;
-}
-
 void main() {
     vUvCoord = uv;
 
-    // Model space vertex: X and Z span the plane, Y is elevation
-    vec4 worldPos = modelMatrix * vec4(position.x, 0.0, position.z, 1.0);
-
-    // Compute exact Perlin noise height displacement
-    float height = getTerrainHeight(worldPos.xz, uElevation, uFrequency, uOctaves, uPersistence, uLacunarity, uSpawnFlatRadius);
-    worldPos.y = height;
+    // Model space vertex: X, Y, Z come directly from the CPU geometry attributes
+    // Y is the exact Perlin elevation matching Rapier trimesh collider 100.000%
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldPos = worldPos.xyz;
-    vElevation = height;
+    vElevation = worldPos.y;
 
-    // Analytical normal via central differences on the Perlin function
-    float eps = 0.35;
-    float hL = getTerrainHeight(worldPos.xz - vec2(eps, 0.0), uElevation, uFrequency, uOctaves, uPersistence, uLacunarity, uSpawnFlatRadius);
-    float hR = getTerrainHeight(worldPos.xz + vec2(eps, 0.0), uElevation, uFrequency, uOctaves, uPersistence, uLacunarity, uSpawnFlatRadius);
-    float hD = getTerrainHeight(worldPos.xz - vec2(0.0, eps), uElevation, uFrequency, uOctaves, uPersistence, uLacunarity, uSpawnFlatRadius);
-    float hU = getTerrainHeight(worldPos.xz + vec2(0.0, eps), uElevation, uFrequency, uOctaves, uPersistence, uLacunarity, uSpawnFlatRadius);
-
-    vec3 normal = normalize(vec3(hL - hR, 2.0 * eps, hD - hU));
-    vNormalVec = normal;
-    vSlope = 1.0 - normal.y; // 0.0 = flat ground, ~1.0 = vertical cliff
+    // Normal from geometry attributes (smooth vertex normal)
+    vec3 norm = normalize(normalMatrix * normal);
+    vNormalVec = norm;
+    vSlope = 1.0 - norm.y; // 0.0 = flat ground, ~1.0 = vertical cliff
 
     gl_Position = projectionMatrix * viewMatrix * worldPos;
 }
@@ -233,87 +161,90 @@ void main() {
 const fragmentShader = /* glsl */ `
 precision highp float;
 
-uniform vec3 uGrassColor;
-uniform vec3 uDirtColor;
-uniform vec3 uRockColor;
-uniform vec3 uLightDir;
-uniform vec3 uLightColor;
-uniform vec3 uAmbientColor;
+uniform vec3 uWireframeColor;
 uniform vec3 uFogColor;
 uniform float uFogNear;
 uniform float uFogFar;
-uniform float uTime;
 
 varying vec3 vWorldPos;
-varying vec3 vNormalVec;
 varying float vElevation;
-varying float vSlope;
-varying vec2 vUvCoord;
-
-// Fast procedural noise for organic soil / rock grain detail
-float hash1(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-float simpleNoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    return mix(
-        mix(hash1(i + vec2(0.0, 0.0)), hash1(i + vec2(1.0, 0.0)), u.x),
-        mix(hash1(i + vec2(0.0, 1.0)), hash1(i + vec2(1.0, 1.0)), u.x),
-        u.y
-    );
-}
 
 void main() {
-    vec3 normal = normalize(vNormalVec);
+    // Subtle elevation brightness accent (higher ridges glow slightly more vivid electric cyan)
+    float heightSheen = clamp((vElevation + 2.0) * 0.02, 0.0, 0.4);
+    vec3 baseColor = clamp(uWireframeColor + vec3(heightSheen * 0.1, heightSheen * 0.35, heightSheen * 0.5), 0.0, 1.0);
 
-    // Natural surface micro-variation
-    float detailNoise = simpleNoise(vWorldPos.xz * 0.75) * 0.16 - 0.08;
-    float fineNoise = simpleNoise(vWorldPos.xz * 3.2) * 0.06 - 0.03;
-    float microVariation = detailNoise + fineNoise;
-
-    // Biome blending:
-    // 1. Low valley dirt transition
-    float valleyFactor = smoothstep(-2.0, 0.8, vElevation);
-    vec3 lowGroundColor = mix(uDirtColor, uGrassColor, valleyFactor);
-
-    // 2. Slope steepness transition (lush flat grass vs steep cliff rock)
-    float slopeFactor = smoothstep(0.18, 0.44, vSlope);
-    vec3 baseTerrainColor = mix(lowGroundColor, uRockColor, slopeFactor);
-
-    // Apply micro-texture variation
-    vec3 albedo = clamp(baseTerrainColor + vec3(microVariation), 0.0, 1.0);
-
-    // Sunlight direction and diffuse shading with soft Half-Lambert wrap
-    vec3 lightDir = normalize(uLightDir);
-    float NdotL = max(dot(normal, lightDir), 0.0);
-    float halfLambert = pow(NdotL * 0.5 + 0.5, 1.8);
-
-    // Subtle specular sheen on slopes
-    vec3 viewDir = normalize(cameraPosition - vWorldPos);
-    vec3 halfVec = normalize(lightDir + viewDir);
-    float spec = pow(max(dot(normal, halfVec), 0.0), 28.0) * 0.12;
-
-    // Composite Lighting
-    vec3 directLight = uLightColor * halfLambert;
-    vec3 ambientLight = uAmbientColor * 0.55;
-    vec3 litColor = albedo * (directLight + ambientLight) + vec3(spec);
-
-    // Distance fog blend matching scene background
+    // Distance fog blend matching scene horizon
     float dist = length(cameraPosition - vWorldPos);
     float fogFactor = clamp((dist - uFogNear) / (uFogFar - uFogNear), 0.0, 1.0);
-    vec3 finalColor = mix(litColor, uFogColor, fogFactor);
+    vec3 finalColor = mix(baseColor, uFogColor, fogFactor);
 
     gl_FragColor = vec4(finalColor, 1.0);
 }
 `;
 
 // -------------------------------------------------------------
-// 4. Ground Class Managing Visuals & Rapier Physics
+// 4. Terrain Chunk Class (Pooled, Lightweight)
+// -------------------------------------------------------------
+
+class TerrainChunk {
+    constructor(size, segments, material) {
+        this.size = size;
+        this.segments = segments;
+        this.cx = 0;
+        this.cz = 0;
+        this.key = '';
+        this.hasPhysics = false;
+        this.collider = null;
+
+        // PlaneGeometry rotated so X is width, Z is depth, Y is up (elevation)
+        this.geometry = new THREE.PlaneGeometry(size, size, segments, segments);
+        this.geometry.rotateX(-Math.PI / 2);
+
+        this.mesh = new THREE.Mesh(this.geometry, material);
+        this.mesh.frustumCulled = false; // Vertex shader handles displacement
+        this.mesh.receiveShadow = true;
+        this.mesh.visible = false;
+    }
+
+    // Set chunk world position
+    setChunkCoords(cx, cz) {
+        this.cx = cx;
+        this.cz = cz;
+        this.key = `${cx},${cz}`;
+        this.mesh.position.set(cx * this.size, 0, cz * this.size);
+    }
+
+    // Populate CPU vertices for Rapier 3D Trimesh collision
+    syncHeights(params) {
+        const positions = this.geometry.attributes.position;
+        const originX = this.cx * this.size;
+        const originZ = this.cz * this.size;
+
+        for (let i = 0; i < positions.count; i++) {
+            const lx = positions.getX(i);
+            const lz = positions.getZ(i);
+            const wx = originX + lx;
+            const wz = originZ + lz;
+            const h = getTerrainElevation(wx, wz, params);
+            positions.setY(i, h);
+        }
+
+        positions.needsUpdate = true;
+        this.geometry.computeVertexNormals();
+        this.geometry.computeBoundingBox();
+        this.geometry.computeBoundingSphere();
+    }
+
+    dispose() {
+        if (this.geometry) {
+            this.geometry.dispose();
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// 5. Infinite Terrain Manager (Ground)
 // -------------------------------------------------------------
 
 export class Ground {
@@ -323,174 +254,301 @@ export class Ground {
 
         this.world = null;
         this.RAPIER = null;
-        this.physicsBody = null;
-        this.collider = null;
+        this.physicsBody = null; // Single fixed rigid body hosting chunk colliders
         this.physicsRebuildTimeout = null;
 
-        this.initVisualMesh();
+        // Chunk Management Maps & Pools
+        this.activeChunks = new Map(); // key -> TerrainChunk
+        this.chunkPool = [];          // TerrainChunk[]
+        this.physicsChunks = new Set(); // Set of keys with active Rapier colliders
+        this.lastCarChunkX = null;
+        this.lastCarChunkZ = null;
+
+        this.initSharedMaterial();
     }
 
-    initVisualMesh() {
-        const size = this.params.size;
-        const segments = this.params.segments;
-
-        // Plane rotated so X is width, Z is depth, Y is up (elevation)
-        this.geometry = new THREE.PlaneGeometry(size, size, segments, segments);
-        this.geometry.rotateX(-Math.PI / 2);
-
-        // Prepopulate CPU vertex positions using exact Perlin elevation
-        this.syncGeometryHeights();
-
-        // 100% Reliable Custom ShaderMaterial
+    initSharedMaterial() {
         this.material = new THREE.ShaderMaterial({
             wireframe: Boolean(this.params.wireframe),
             side: THREE.DoubleSide,
             depthWrite: true,
             depthTest: true,
             uniforms: {
-                uElevation: { value: this.params.elevation },
-                uFrequency: { value: this.params.frequency },
-                uOctaves: { value: Math.round(this.params.octaves) },
-                uPersistence: { value: this.params.persistence },
-                uLacunarity: { value: this.params.lacunarity },
-                uSpawnFlatRadius: { value: this.params.spawnFlatRadius },
-                uGrassColor: { value: new THREE.Color(this.params.grassColor) },
-                uDirtColor: { value: new THREE.Color(this.params.dirtColor) },
-                uRockColor: { value: new THREE.Color(this.params.rockColor) },
-                uLightDir: { value: new THREE.Vector3(25, 40, 20).normalize() },
-                uLightColor: { value: new THREE.Color(0xffffff) },
-                uAmbientColor: { value: new THREE.Color(0xffffff) },
-                uFogColor: { value: new THREE.Color(0x181a1f) },
-                uFogNear: { value: 90.0 },
-                uFogFar: { value: 190.0 },
+                uWireframeColor: { value: new THREE.Color(this.params.wireframeColor || '#00a2ff') },
+                uFogColor: { value: new THREE.Color(this.params.fogColor) },
+                uFogNear: { value: this.params.fogNear },
+                uFogFar: { value: this.params.fogFar },
                 uTime: { value: 0.0 },
             },
             vertexShader,
             fragmentShader
         });
-
-        this.mesh = new THREE.Mesh(this.geometry, this.material);
-        this.mesh.frustumCulled = false; // Never clip terrain
-        this.mesh.receiveShadow = true;
-        this.scene.add(this.mesh);
     }
 
-    // Set CPU buffer coordinates for accurate bounding boxes & Rapier Trimesh collider
-    syncGeometryHeights() {
-        const positions = this.geometry.attributes.position;
-        for (let i = 0; i < positions.count; i++) {
-            const x = positions.getX(i);
-            const z = positions.getZ(i);
-            const h = getTerrainElevation(x, z, this.params);
-            positions.setY(i, h);
+    // Acquire a chunk from pool or instantiate new one
+    acquireChunk(cx, cz) {
+        let chunk;
+        if (this.chunkPool.length > 0) {
+            chunk = this.chunkPool.pop();
+        } else {
+            chunk = new TerrainChunk(this.params.chunkSize, this.params.segmentsPerChunk, this.material);
+            this.scene.add(chunk.mesh);
         }
-        positions.needsUpdate = true;
-        this.geometry.computeVertexNormals();
-        this.geometry.computeBoundingBox();
-        this.geometry.computeBoundingSphere();
+
+        chunk.setChunkCoords(cx, cz);
+        chunk.syncHeights(this.params);
+        chunk.mesh.visible = true;
+        return chunk;
     }
 
-    // Create Rapier static body and trimesh collider
+    // Release chunk back to pool and unregister physics
+    recycleChunk(chunk) {
+        if (chunk.hasPhysics && chunk.collider && this.world) {
+            try {
+                this.world.removeCollider(chunk.collider, false);
+            } catch {
+                // ignore already removed
+            }
+            chunk.collider = null;
+            chunk.hasPhysics = false;
+        }
+
+        chunk.mesh.visible = false;
+        this.physicsChunks.delete(chunk.key);
+        this.chunkPool.push(chunk);
+    }
+
+    // Initialize Rapier Physics
     createPhysics(world, RAPIER) {
         this.world = world;
         this.RAPIER = RAPIER;
 
+        // Fixed rigid body at (0, 0, 0) hosting all active chunk colliders
         const bodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(0, 0, 0);
         this.physicsBody = world.createRigidBody(bodyDesc);
 
-        this.buildCollider();
+        // Update chunks around origin immediately
+        this.updateChunks(0, 0, true);
     }
 
-    // Build or rebuild Rapier Trimesh collider from current CPU vertices
-    buildCollider() {
+    // Attach Rapier Trimesh collider to a chunk
+    attachChunkPhysics(chunk) {
         if (!this.world || !this.physicsBody || !this.RAPIER) return;
+        if (chunk.hasPhysics && chunk.collider) return;
 
-        // Remove previous collider if present
-        if (this.collider) {
-            this.world.removeCollider(this.collider, false);
-            this.collider = null;
-        }
+        // Compute CPU heights for this chunk
+        chunk.syncHeights(this.params);
 
-        const vertices = Float32Array.from(this.geometry.attributes.position.array);
-        const indices = Uint32Array.from(this.geometry.index.array);
+        const vertices = Float32Array.from(chunk.geometry.attributes.position.array);
+        const indices = Uint32Array.from(chunk.geometry.index.array);
 
-        // Enable FIX_INTERNAL_EDGES (flag 144) to eliminate ghost bumps & jitter at triangle cross-sections
+        // FIX_INTERNAL_EDGES (144) to eliminate ghost bumps at triangle junctions
         const trimeshFlags = this.RAPIER.TriMeshFlags?.FIX_INTERNAL_EDGES ?? 144;
         const colliderDesc = this.RAPIER.ColliderDesc.trimesh(vertices, indices, trimeshFlags)
+            .setTranslation(chunk.cx * this.params.chunkSize, 0, chunk.cz * this.params.chunkSize)
             .setRestitution(0.0)
             .setRestitutionCombineRule(this.RAPIER.CoefficientCombineRule.Min)
             .setFriction(0.85);
 
-        this.collider = this.world.createCollider(colliderDesc, this.physicsBody);
+        chunk.collider = this.world.createCollider(colliderDesc, this.physicsBody);
+        chunk.hasPhysics = true;
+        this.physicsChunks.add(chunk.key);
+    }
+
+    // Detach Rapier Trimesh collider from a chunk
+    detachChunkPhysics(chunk) {
+        if (!this.world || !chunk.hasPhysics || !chunk.collider) return;
+
+        try {
+            this.world.removeCollider(chunk.collider, false);
+        } catch {
+            // ignore
+        }
+        chunk.collider = null;
+        chunk.hasPhysics = false;
+        this.physicsChunks.delete(chunk.key);
+    }
+
+    // Update active chunk grid around car position
+    updateChunks(carX = 0, carZ = 0, force = false) {
+        const chunkSize = this.params.chunkSize;
+        const currentCx = Math.floor((carX + chunkSize / 2) / chunkSize);
+        const currentCz = Math.floor((carZ + chunkSize / 2) / chunkSize);
+
+        if (!force && currentCx === this.lastCarChunkX && currentCz === this.lastCarChunkZ) {
+            return;
+        }
+
+        this.lastCarChunkX = currentCx;
+        this.lastCarChunkZ = currentCz;
+
+        const renderDist = this.params.renderDistance;
+        const physicsRadius = this.params.physicsRadius;
+        const visibleKeys = new Set();
+        const physicsKeys = new Set();
+
+        // 1. Determine which chunks should be visible and which should have physics
+        const maxDistSq = (renderDist + 0.45) * (renderDist + 0.45);
+        for (let dx = -renderDist; dx <= renderDist; dx++) {
+            for (let dz = -renderDist; dz <= renderDist; dz++) {
+                if (dx * dx + dz * dz <= maxDistSq) {
+                    const cx = currentCx + dx;
+                    const cz = currentCz + dz;
+                    const key = `${cx},${cz}`;
+                    visibleKeys.add(key);
+
+                    // Physics vicinity: immediate neighborhood (e.g. 3x3 grid)
+                    if (Math.abs(dx) <= physicsRadius && Math.abs(dz) <= physicsRadius) {
+                        physicsKeys.add(key);
+                    }
+                }
+            }
+        }
+
+        // 2. Recycle chunks that moved out of visible range
+        for (const [key, chunk] of this.activeChunks.entries()) {
+            if (!visibleKeys.has(key)) {
+                this.recycleChunk(chunk);
+                this.activeChunks.delete(key);
+            }
+        }
+
+        // 3. Spawn or keep chunks in visible range
+        for (const key of visibleKeys) {
+            let chunk = this.activeChunks.get(key);
+            if (!chunk) {
+                const [cxStr, czStr] = key.split(',');
+                const cx = parseInt(cxStr, 10);
+                const cz = parseInt(czStr, 10);
+                chunk = this.acquireChunk(cx, cz);
+                this.activeChunks.set(key, chunk);
+            }
+
+            // Sync physics status
+            if (physicsKeys.has(key)) {
+                if (!chunk.hasPhysics) {
+                    this.attachChunkPhysics(chunk);
+                }
+            } else {
+                if (chunk.hasPhysics) {
+                    this.detachChunkPhysics(chunk);
+                }
+            }
+        }
+    }
+
+    // Rebuild all physics colliders (called on noise param / seed changes)
+    rebuildPhysics() {
+        for (const chunk of this.activeChunks.values()) {
+            chunk.syncHeights(this.params);
+            if (chunk.hasPhysics) {
+                this.detachChunkPhysics(chunk);
+                this.attachChunkPhysics(chunk);
+            }
+        }
+    }
+
+    // Compatibility alias
+    syncGeometryHeights() {
+        this.rebuildPhysics();
+    }
+
+    buildCollider() {
+        this.rebuildPhysics();
+    }
+
+    // Query elevation at any world coordinate in infinite space
+    getHeightAt(x, z) {
+        return getTerrainElevation(x, z, this.params);
+    }
+
+    // Query normal at any world coordinate in infinite space
+    getNormalAt(x, z) {
+        return getTerrainNormal(x, z, this.params);
+    }
+
+    // Frame update for animation loop
+    update(carPosOrDelta, deltaOrLight, sunPosOrAmbient, maybeSunColor, maybeAmbientColor) {
+        let delta = 0.016;
+        let carX = 0;
+        let carZ = 0;
+        let sunPosition = null;
+        let sunColor = null;
+        let ambientColor = null;
+
+        // Support both update(carPos, delta, ...) and legacy update(delta, ...)
+        if (carPosOrDelta && typeof carPosOrDelta.x === 'number' && typeof carPosOrDelta.z === 'number') {
+            carX = carPosOrDelta.x;
+            carZ = carPosOrDelta.z;
+            delta = typeof deltaOrLight === 'number' ? deltaOrLight : 0.016;
+            sunPosition = sunPosOrAmbient;
+            sunColor = maybeSunColor;
+            ambientColor = maybeAmbientColor;
+        } else if (typeof carPosOrDelta === 'number') {
+            delta = carPosOrDelta;
+            sunPosition = deltaOrLight;
+            sunColor = sunPosOrAmbient;
+            ambientColor = maybeSunColor;
+        }
+
+        if (this.material && this.material.uniforms) {
+            if (this.material.uniforms.uTime) {
+                this.material.uniforms.uTime.value += delta;
+            }
+
+            if (sunPosition && this.material.uniforms.uLightDir) {
+                this.material.uniforms.uLightDir.value.copy(sunPosition).normalize();
+            }
+            if (sunColor && this.material.uniforms.uLightColor) {
+                this.material.uniforms.uLightColor.value.copy(sunColor);
+            }
+            if (ambientColor && this.material.uniforms.uAmbientColor) {
+                this.material.uniforms.uAmbientColor.value.copy(ambientColor);
+            }
+        }
+
+        // Dynamically stream chunks in the car's vicinity
+        this.updateChunks(carX, carZ);
     }
 
     // Handle updates from Leva controls in real time
     updateParams(newParams, carBody = null) {
-        let geometryNeedsUpdate = false;
-        let resolutionNeedsRebuild = false;
+        let noiseNeedsRebuild = false;
 
-        if (newParams.segments !== undefined && Math.round(newParams.segments) !== this.params.segments) {
-            resolutionNeedsRebuild = true;
-            geometryNeedsUpdate = true;
-        }
-
-        const keysToCheck = ['elevation', 'frequency', 'octaves', 'persistence', 'lacunarity', 'spawnFlatRadius'];
-        for (const key of keysToCheck) {
+        const noiseKeys = ['seed', 'elevation', 'frequency', 'octaves', 'persistence', 'lacunarity', 'spawnFlatRadius'];
+        for (const key of noiseKeys) {
             if (newParams[key] !== undefined && Math.abs(newParams[key] - this.params[key]) > 0.0001) {
-                geometryNeedsUpdate = true;
+                noiseNeedsRebuild = true;
                 break;
             }
         }
 
         // Apply new values to config
         this.params = { ...this.params, ...newParams };
-        if (newParams.segments !== undefined) {
-            this.params.segments = Math.round(newParams.segments);
-        }
 
-        if (resolutionNeedsRebuild) {
-            if (this.geometry) {
-                this.geometry.dispose();
-            }
-            this.geometry = new THREE.PlaneGeometry(
-                this.params.size,
-                this.params.size,
-                this.params.segments,
-                this.params.segments
-            );
-            this.geometry.rotateX(-Math.PI / 2);
-            if (this.mesh) {
-                this.mesh.geometry = this.geometry;
-            }
-        }
-
-        // 1. Instant GPU Shader Uniform updates (60fps responsive)
+        // 1. Instant GPU Shader Uniform updates (silky 60fps responsive)
         if (this.material && this.material.uniforms) {
-            if (newParams.elevation !== undefined) this.material.uniforms.uElevation.value = this.params.elevation;
-            if (newParams.frequency !== undefined) this.material.uniforms.uFrequency.value = this.params.frequency;
-            if (newParams.octaves !== undefined) this.material.uniforms.uOctaves.value = Math.round(this.params.octaves);
-            if (newParams.persistence !== undefined) this.material.uniforms.uPersistence.value = this.params.persistence;
-            if (newParams.lacunarity !== undefined) this.material.uniforms.uLacunarity.value = this.params.lacunarity;
-            if (newParams.spawnFlatRadius !== undefined) this.material.uniforms.uSpawnFlatRadius.value = this.params.spawnFlatRadius;
-
-            if (newParams.grassColor !== undefined) this.material.uniforms.uGrassColor.value.set(this.params.grassColor);
-            if (newParams.dirtColor !== undefined) this.material.uniforms.uDirtColor.value.set(this.params.dirtColor);
-            if (newParams.rockColor !== undefined) this.material.uniforms.uRockColor.value.set(this.params.rockColor);
-
+            if (newParams.wireframeColor !== undefined) {
+                this.material.uniforms.uWireframeColor.value.set(this.params.wireframeColor);
+            }
             if (newParams.wireframe !== undefined) {
                 this.material.wireframe = Boolean(this.params.wireframe);
             }
         }
 
-        // 2. Debounced physics collider sync to maintain silky framerate while dragging sliders
-        if (geometryNeedsUpdate) {
+        // Update active chunk range if renderDistance changed
+        if (newParams.renderDistance !== undefined || newParams.physicsRadius !== undefined) {
+            this.updateChunks(this.lastCarChunkX * this.params.chunkSize, this.lastCarChunkZ * this.params.chunkSize, true);
+        }
+
+        // 2. Debounced physics collider sync to maintain smooth framerate while dragging sliders
+        if (noiseNeedsRebuild) {
             if (this.physicsRebuildTimeout) {
                 clearTimeout(this.physicsRebuildTimeout);
             }
 
             this.physicsRebuildTimeout = setTimeout(() => {
-                this.syncGeometryHeights();
-                this.buildCollider();
+                this.rebuildPhysics();
 
                 // If car is currently clipping underneath new terrain, nudge it upward safely
                 if (carBody) {
@@ -500,34 +558,7 @@ export class Ground {
                         carBody.setTranslation({ x: t.x, y: surfaceY + 0.2, z: t.z }, true);
                     }
                 }
-            }, 50);
-        }
-    }
-
-    // Query height at any world coordinate
-    getHeightAt(x, z) {
-        return getTerrainElevation(x, z, this.params);
-    }
-
-    // Query normal at any world coordinate
-    getNormalAt(x, z) {
-        return getTerrainNormal(x, z, this.params);
-    }
-
-    // Frame update for animation loop
-    update(delta, sunPosition = null, sunColor = null, ambientColor = null) {
-        if (!this.material || !this.material.uniforms) return;
-
-        this.material.uniforms.uTime.value += delta;
-
-        if (sunPosition) {
-            this.material.uniforms.uLightDir.value.copy(sunPosition).normalize();
-        }
-        if (sunColor) {
-            this.material.uniforms.uLightColor.value.copy(sunColor);
-        }
-        if (ambientColor) {
-            this.material.uniforms.uAmbientColor.value.copy(ambientColor);
+            }, 60);
         }
     }
 
@@ -536,26 +567,181 @@ export class Ground {
             clearTimeout(this.physicsRebuildTimeout);
         }
 
-        if (this.world && this.collider) {
-            this.world.removeCollider(this.collider, false);
-            this.collider = null;
+        // Clean up all active chunks
+        for (const chunk of this.activeChunks.values()) {
+            this.recycleChunk(chunk);
+            chunk.dispose();
+            if (chunk.mesh) {
+                this.scene.remove(chunk.mesh);
+            }
         }
+        this.activeChunks.clear();
 
+        // Clean up pool
+        for (const chunk of this.chunkPool) {
+            chunk.dispose();
+            if (chunk.mesh) {
+                this.scene.remove(chunk.mesh);
+            }
+        }
+        this.chunkPool = [];
+
+        // Remove physics body
         if (this.world && this.physicsBody) {
-            this.world.removeRigidBody(this.physicsBody);
+            try {
+                this.world.removeRigidBody(this.physicsBody);
+            } catch {
+                // ignore
+            }
             this.physicsBody = null;
-        }
-
-        if (this.mesh) {
-            this.scene.remove(this.mesh);
-        }
-
-        if (this.geometry) {
-            this.geometry.dispose();
         }
 
         if (this.material) {
             this.material.dispose();
         }
     }
+}
+
+// -------------------------------------------------------------
+// 6. Seeded Perlin Noise Radar / Mini-Map Canvas Renderer
+// -------------------------------------------------------------
+
+/**
+ * Draws a 2D topographical mini-map from seeded Perlin noise centered around the vehicle.
+ */
+export function drawPerlinNoiseRadar(canvas, carX, carZ, carHeading, params = DEFAULT_GROUND_CONFIG, range = 180) {
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const width = canvas.width;
+    const height = canvas.height;
+    const halfW = width / 2;
+    const halfH = height / 2;
+    const scale = width / (range * 2);
+
+    // Fast low-res image buffer for topographical terrain contour
+    const imgSize = 48;
+    const imgData = ctx.createImageData(imgSize, imgSize);
+    const data = imgData.data;
+
+    const stepWorld = (range * 2) / imgSize;
+    const startX = carX - range;
+    const startZ = carZ - range;
+
+    const elevAmp = params.elevation || 14.0;
+
+    let ptr = 0;
+    for (let py = 0; py < imgSize; py++) {
+        const wz = startZ + py * stepWorld;
+        for (let px = 0; px < imgSize; px++) {
+            const wx = startX + px * stepWorld;
+            const h = getTerrainElevation(wx, wz, params);
+            const normH = Math.max(0, Math.min(1, (h + 2.0) / (elevAmp * 1.2 + 2.0)));
+
+            // Color coding: sleek cyber blue contour matching the blue wireframe world
+            const r = Math.floor(normH * 20);
+            const g = Math.floor(60 + normH * 130);
+            const b = Math.floor(130 + normH * 125);
+
+            data[ptr++] = r;
+            data[ptr++] = g;
+            data[ptr++] = b;
+            data[ptr++] = 230; // Alpha
+        }
+    }
+
+    // 1. Draw smooth topographical map
+    ctx.clearRect(0, 0, width, height);
+
+    // Draw temporary bitmap scaled up smoothly with image smoothing
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = imgSize;
+    tempCanvas.height = imgSize;
+    tempCanvas.getContext('2d').putImageData(imgData, 0, 0);
+
+    ctx.save();
+    // Clip circular radar
+    ctx.beginPath();
+    ctx.arc(halfW, halfH, halfW - 2, 0, Math.PI * 2);
+    ctx.clip();
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(tempCanvas, 0, 0, width, height);
+
+    // 2. Draw Chunk Grid Lines
+    const chunkSize = params.chunkSize || 40;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+    ctx.lineWidth = 1;
+
+    const minChunkX = Math.floor(startX / chunkSize) * chunkSize;
+    const maxChunkX = Math.ceil((startX + range * 2) / chunkSize) * chunkSize;
+    for (let wx = minChunkX; wx <= maxChunkX; wx += chunkSize) {
+        const sx = (wx - carX) * scale + halfW;
+        ctx.beginPath();
+        ctx.moveTo(sx, 0);
+        ctx.lineTo(sx, height);
+        ctx.stroke();
+    }
+
+    const minChunkZ = Math.floor(startZ / chunkSize) * chunkSize;
+    const maxChunkZ = Math.ceil((startZ + range * 2) / chunkSize) * chunkSize;
+    for (let wz = minChunkZ; wz <= maxChunkZ; wz += chunkSize) {
+        const sy = (wz - carZ) * scale + halfH;
+        ctx.beginPath();
+        ctx.moveTo(0, sy);
+        ctx.lineTo(width, sy);
+        ctx.stroke();
+    }
+
+    // 3. Draw Radar Concentric Range Rings (50m, 100m)
+    [50, 100, 150].forEach(rDist => {
+        const radPix = rDist * scale;
+        if (radPix < halfW - 4) {
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+            ctx.beginPath();
+            ctx.arc(halfW, halfH, radPix, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+    });
+
+    // Crosshairs
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+    ctx.beginPath();
+    ctx.moveTo(halfW, halfH - 12);
+    ctx.lineTo(halfW, halfH + 12);
+    ctx.moveTo(halfW - 12, halfH);
+    ctx.lineTo(halfW + 12, halfH);
+    ctx.stroke();
+
+    ctx.restore();
+
+    // 4. Draw Radar Bezel Ring
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.6)'; // Cyan bezel
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(halfW, halfH, halfW - 2, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 5. Draw Car Arrow Indicator in Center
+    ctx.save();
+    ctx.translate(halfW, halfH);
+    // Heading in Three.js: car forward is along +X, lateral is +Z
+    // In 2D map: X is right, Z is down (y)
+    ctx.rotate(carHeading);
+
+    // Glowing dot & arrow
+    ctx.shadowColor = '#38bdf8';
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = '#38bdf8';
+
+    ctx.beginPath();
+    ctx.moveTo(0, -9);     // Arrow head pointing forward
+    ctx.lineTo(5, 6);
+    ctx.lineTo(0, 3);
+    ctx.lineTo(-5, 6);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
 }

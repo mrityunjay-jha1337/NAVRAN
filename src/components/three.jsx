@@ -4,7 +4,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { useControls, button, folder, Leva } from 'leva';
-import { Ground, DEFAULT_GROUND_CONFIG } from './Ground.js';
+import { Ground, DEFAULT_GROUND_CONFIG, drawPerlinNoiseRadar } from './Ground.js';
 
 function ThreeScene() {
     const mountRef = useRef(null);
@@ -12,6 +12,8 @@ function ThreeScene() {
     const gearRef = useRef(null);
     const nitroBadgeRef = useRef(null);
     const cameraBadgeRef = useRef(null);
+    const radarCanvasRef = useRef(null);
+    const coordsRef = useRef(null);
 
     const [debugVisible, setDebugVisible] = useState(false);
     const debugVisibleRef = useRef(false);
@@ -21,12 +23,31 @@ function ThreeScene() {
     // References to active simulation entities
     const groundRef = useRef(null);
     const carBodyRef = useRef(null);
+    const carSceneRef = useRef(null);
 
     // -------------------------------------------------------------
     // Leva Controls for Real-Time Smooth Perlin Noise Ground Tuning
     // -------------------------------------------------------------
     const groundParams = useControls('Terrain Settings', {
-        'Noise & Curves': folder({
+        'Procedural World': folder({
+            seed: {
+                value: DEFAULT_GROUND_CONFIG.seed,
+                min: 1,
+                max: 99999,
+                step: 1,
+                label: 'World Seed'
+            },
+            renderDistance: {
+                value: DEFAULT_GROUND_CONFIG.renderDistance,
+                min: 2,
+                max: 6,
+                step: 1,
+                label: 'Render Radius (Chunks)'
+            },
+            showRadar: {
+                value: true,
+                label: 'Show Terrain Radar'
+            },
             elevation: {
                 value: DEFAULT_GROUND_CONFIG.elevation,
                 min: 0.0,
@@ -65,34 +86,19 @@ function ThreeScene() {
             spawnFlatRadius: {
                 value: DEFAULT_GROUND_CONFIG.spawnFlatRadius,
                 min: 0.0,
-                max: 30.0,
+                max: 100.0,
                 step: 5.0,
                 label: 'Spawn Plateau (m)'
             },
-            segments: {
-                value: DEFAULT_GROUND_CONFIG.segments,
-                min: 10,
-                max: 200,
-                step: 10,
-                label: 'Mesh Subdivisions'
-            },
         }),
-        'Shader Styling': folder({
-            grassColor: {
-                value: DEFAULT_GROUND_CONFIG.grassColor,
-                label: 'Grass Color'
-            },
-            dirtColor: {
-                value: DEFAULT_GROUND_CONFIG.dirtColor,
-                label: 'Valley Dirt Color'
-            },
-            rockColor: {
-                value: DEFAULT_GROUND_CONFIG.rockColor,
-                label: 'Cliff Rock Color'
+        'Ground Wireframe': folder({
+            wireframeColor: {
+                value: DEFAULT_GROUND_CONFIG.wireframeColor,
+                label: 'Wireframe Color'
             },
             wireframe: {
-                value: DEFAULT_GROUND_CONFIG.wireframe,
-                label: 'Wireframe Mode'
+                value: true,
+                label: 'Show Ground Wireframe'
             },
         }),
         'Simulation Actions': folder({
@@ -104,6 +110,31 @@ function ThreeScene() {
             }),
         })
     });
+
+    const carVisualParams = useControls('Vehicle Visuals', {
+        carWireframe: {
+            value: false,
+            label: 'Car Wireframe Mode'
+        }
+    });
+    const carVisualParamsRef = useRef(carVisualParams);
+
+    // Toggle car wireframe reactively when changed in Leva
+    const isCarWireframe = carVisualParams.carWireframe;
+    useEffect(() => {
+        carVisualParamsRef.current = carVisualParams;
+        if (carSceneRef.current) {
+            carSceneRef.current.traverse((child) => {
+                if (child.isMesh && child.material) {
+                    if (Array.isArray(child.material)) {
+                        child.material.forEach(m => { m.wireframe = isCarWireframe; });
+                    } else {
+                        child.material.wireframe = isCarWireframe;
+                    }
+                }
+            });
+        }
+    }, [isCarWireframe, carVisualParams]);
 
     const tyreParams = useControls('Tyre Colliders', {
         colliderShape: {
@@ -131,7 +162,7 @@ function ThreeScene() {
             label: 'Shoulder Bevel (m)'
         },
         tyreRadius: {
-            value: 0.312,
+            value: 0.315,
             min: 0.280,
             max: 0.350,
             step: 0.002,
@@ -194,13 +225,13 @@ function ThreeScene() {
         let carBody = null;
         let carScene = null;
         let ground = null;
-        const clock = new THREE.Clock();
+        let lastTime = performance.now();
 
         // Driving Tuning Parameters (Tuned for smooth, realistic sports car physics)
         const CAR_MASS = 1500;                     // 1500 kg Real Car Mass
         const WHEEL_MASS = 25;                     // 25 kg per wheel
-        const NORMAL_FORWARD_SPEED = 24;           // ~86 km/h normal cruising top speed
-        const BOOST_FORWARD_SPEED = 42;            // ~151 km/h Turbo Nitro top speed
+        const NORMAL_FORWARD_SPEED = 40;           // ~86 km/h normal cruising top speed
+        const BOOST_FORWARD_SPEED = 100;            // ~151 km/h Turbo Nitro top speed
         const NORMAL_ACCEL_FORCE = CAR_MASS * 18;  // Responsive engine acceleration
         const BOOST_ACCEL_FORCE = CAR_MASS * 40;   // Explosive Turbo Nitro force
         const MAX_REVERSE_SPEED = 18;              // ~65 km/h max reverse
@@ -228,7 +259,7 @@ function ThreeScene() {
         // 1. Scene
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x181a1f);
-        scene.fog = new THREE.Fog(0x181a1f, 90, 190);
+        scene.fog = new THREE.Fog(0x181a1f, DEFAULT_GROUND_CONFIG.fogNear, DEFAULT_GROUND_CONFIG.fogFar);
 
         // 2. Camera (Starts behind car looking forward - GTA 3rd person chase)
         const camera = new THREE.PerspectiveCamera(
@@ -430,13 +461,6 @@ function ThreeScene() {
                 // Attach Ground Trimesh Physics Collider to Rapier Scene
                 ground.createPhysics(world, RAPIER);
 
-                // Boundary walls around perimeter (240m x 240m terrain) to keep vehicle inside
-                const wallBody = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
-                world.createCollider(RAPIER.ColliderDesc.cuboid(120, 35, 2).setTranslation(0, 0, 120), wallBody);
-                world.createCollider(RAPIER.ColliderDesc.cuboid(120, 35, 2).setTranslation(0, 0, -120), wallBody);
-                world.createCollider(RAPIER.ColliderDesc.cuboid(2, 35, 120).setTranslation(120, 0, 0), wallBody);
-                world.createCollider(RAPIER.ColliderDesc.cuboid(2, 35, 120).setTranslation(-120, 0, 0), wallBody);
-
                 // Dynamic Car RigidBody with CCD
                 // Spawns smoothly resting right on the ground (contact at Y = 0.000m)
                 const initialSpawnY = ground.getHeightAt(0, 0) + 0.085;
@@ -510,7 +534,7 @@ function ThreeScene() {
                             .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min)
                             .setRestitution(0.0)
                             .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min)
-                            .setContactSkin(0.015);
+                            .setContactSkin(0.002);
 
                         const col = world.createCollider(wheelColliderDesc, carBody);
                         activeWheelColliders.push(col);
@@ -578,6 +602,8 @@ function ThreeScene() {
                     (gltf) => {
                         if (!isMounted) return;
                         carScene = gltf.scene;
+                        carSceneRef.current = carScene;
+                        const isCarWire = carVisualParamsRef.current?.carWireframe ?? false;
 
                         carScene.position.set(0, initialSpawnY, 0);
 
@@ -585,6 +611,13 @@ function ThreeScene() {
                             if (child.isMesh) {
                                 child.castShadow = true;
                                 child.receiveShadow = true;
+                                if (child.material) {
+                                    if (Array.isArray(child.material)) {
+                                        child.material.forEach(m => { m.wireframe = isCarWire; });
+                                    } else {
+                                        child.material.wireframe = isCarWire;
+                                    }
+                                }
                             }
                         });
 
@@ -617,10 +650,13 @@ function ThreeScene() {
             if (!isMounted) return;
             animationId = requestAnimationFrame(animate);
 
-            const delta = Math.min(clock.getDelta(), 0.05);
+            const now = performance.now();
+            const delta = Math.min((now - lastTime) / 1000, 0.05);
+            lastTime = now;
 
             if (ground) {
-                ground.update(delta, directionalLight.position, directionalLight.color, ambientLight.color);
+                const carPos = carBody ? carBody.translation() : { x: 0, z: 0 };
+                ground.update(carPos, delta, directionalLight.position, directionalLight.color, ambientLight.color);
             }
 
             if (world) {
@@ -869,13 +905,23 @@ function ThreeScene() {
                     camera.position.add(carDelta);
                     currentLookTarget.add(carDelta);
 
-                    // Safety net respawn
-                    if (ground && (translation.y < -30.0 || Math.abs(translation.x) > 130 || Math.abs(translation.z) > 130)) {
+                    // Safety net respawn: only if car falls through into the void
+                    if (translation.y < -40.0) {
                         respawnCar();
                     }
 
                     const carQuat = new THREE.Quaternion(rotation.x, rotation.y, rotation.z, rotation.w);
                     const forward = new THREE.Vector3(1, 0, 0).applyQuaternion(carQuat);
+
+                    // Update live GPS coordinates & Seeded Perlin Noise Radar
+                    if (coordsRef.current) {
+                        coordsRef.current.innerText = `X: ${translation.x.toFixed(1)} | Z: ${translation.z.toFixed(1)} | Y: ${translation.y.toFixed(1)}m`;
+                    }
+
+                    if (radarCanvasRef.current && groundParamsRef.current.showRadar) {
+                        const heading = Math.atan2(forward.x, -forward.z);
+                        drawPerlinNoiseRadar(radarCanvasRef.current, translation.x, translation.z, heading, groundParamsRef.current, 180);
+                    }
 
                     const linvel = carBody.linvel();
                     const currentVel = new THREE.Vector3(linvel.x, linvel.y, linvel.z);
@@ -1051,6 +1097,7 @@ function ThreeScene() {
             window.removeEventListener('car:respawn', handleCarRespawn);
             window.removeEventListener('ground:rebuild-physics', handleRebuildPhysics);
             rebuildWheelCollidersRef.current = null;
+            carSceneRef.current = null;
 
             if (ground) {
                 ground.dispose();
@@ -1079,9 +1126,39 @@ function ThreeScene() {
             {/* 3D WebGL Canvas */}
             <div ref={mountRef} className="w-full h-full" />
 
+            
+            {/* Bottom-Left Speedometer & Driving HUD */}
+            <div className="absolute top-6 left-6 pointer-events-none  z-10 flex flex-col gap-2">
+                <div className="flex items-baseline gap-2 bg-neutral-900/85 backdrop-blur-md border border-white/10 mx-auto flex flex-center py-10 rounded-2xl px-5 py-3 shadow-2xl">
+                    <span ref={speedRef} className="text-5xl font-mono font-black tracking-tight text-white">0</span>
+                    <span className="text-sm font-mono font-bold text-neutral-400">KM/H</span>
+                    <div className="ml-4 pl-4 border-l border-white/10 flex flex-col">
+                    </div>
+                </div>
+                
+            </div>
+
+            {/* Bottom-Right Seeded Perlin Noise Radar Mini-Map */}
+            {groundParams.showRadar && (
+                <div className="absolute bottom-6 right-6 pointer-events-none z-10 flex flex-col items-end gap-1.5">
+                    <div className="relative p-2 rounded-2xl bg-neutral-900/85 backdrop-blur-md border border-white/15 shadow-2xl flex flex-col items-center">
+                
+                        <canvas
+                            ref={radarCanvasRef}
+                            width={160}
+                            height={160}
+                            className="w-[160px] h-[160px] mt-1.5 rounded-full shadow-inner"
+                        />
+                        <div ref={coordsRef} className="mt-1.5 text-[10px] font-mono text-neutral-400">
+                            X: 0.0 | Z: 0.0 | Y: 0.0m
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Leva GUI Control Panel Config */}
             <Leva
-                titleBar={{ title: 'Ground Shader & Perlin Noise' }}
+                titleBar={{ title: 'Infinite Ground & Perlin World' }}
                 collapsed={true}
                 oneLineLabels={false}
             />
