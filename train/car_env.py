@@ -117,6 +117,8 @@ class CarDashEnv(gym.Env):
         self.prev_throttle = 0.0
         self.step_count = 0
         self.is_airborne = False
+        self.airborne_steps = 0
+        self.airborne_steps = 0
         self.seed_val = ROAD_CONFIG.DEFAULT_SEED
         self.target_x = 0.0
         self.target_y = 0.0
@@ -148,6 +150,7 @@ class CarDashEnv(gym.Env):
         self.prev_throttle = 0.0
         self.step_count = 0
         self.is_airborne = False
+        self.airborne_steps = 0
 
         # Spawn valid forward target on road surface
         self.target_x, self.target_y, self.target_z = self.target_mgr.sample_forward_target(
@@ -236,10 +239,18 @@ class CarDashEnv(gym.Env):
         elif throttle_in < 0.0:
             self.vx -= (VEHICLE_CONFIG.BRAKE_FORCE * abs(throttle_in) / self.MASS) * self.DT
 
-        # Prevent reversing beyond -5 m/s
-        self.vx = max(self.vx, -5.0)
+        # Prevent reversing beyond -3 m/s
+        self.vx = max(self.vx, -3.0)
 
-        # 3. Lateral Grip Friction & Slip
+        # 3. Dynamic Centrifugal Lateral Slip & Grip Limits (Matches Rapier physics)
+        # Centripetal acceleration is vx * yaw_rate. If exceeding tire grip (~13.5 m/s^2), excess accelerates lateral slip.
+        centrifugal_accel = self.vx * self.yaw_rate
+        max_tire_lat_accel = VEHICLE_CONFIG.MAX_TIRE_LAT_ACCEL
+        if abs(centrifugal_accel) > max_tire_lat_accel:
+            excess_accel = (abs(centrifugal_accel) - max_tire_lat_accel) * math.copysign(1.0, centrifugal_accel)
+            self.vz += excess_accel * self.DT * 0.8
+
+        # Lateral grip friction damping
         self.vz *= (1.0 - VEHICLE_CONFIG.LATERAL_GRIP_DAMPING * self.DT * 10.0)
 
         # 4. Yaw Kinematics
@@ -276,26 +287,50 @@ class CarDashEnv(gym.Env):
         # -------------------------------------------------------------
         # Multi-Objective Reward Calculation (Highway Path-Corridor + Target Interception)
         # -------------------------------------------------------------
-        # A. Road Corridor Forward Progress (Always positive for forward travel along road)
+        # A. Road Corridor Forward Progress (ONLY when wheels are on the ground)
         road_z, road_dz = get_procedural_road_curve(self.pos_x, self.seed_val)
         road_tangent = math.atan2(road_dz, 1.0)
         heading_alignment = math.cos(self.yaw - road_tangent)
-        r_fwd_prog = REWARD_CONFIG.FORWARD_PROGRESS_WEIGHT * (max(0.0, self.vx) / REWARD_CONFIG.SPEED_NORMALIZER) * max(0.0, heading_alignment)
+        
+        # Suppress progress & speed if airborne (no free points in the sky!)
+        progress_mult = 0.0 if self.is_airborne else 1.0
+        r_fwd_prog = REWARD_CONFIG.FORWARD_PROGRESS_WEIGHT * (max(0.0, self.vx) / REWARD_CONFIG.SPEED_NORMALIZER) * max(0.0, heading_alignment) * progress_mult
 
-        # B. Pure Velocity Incentive
-        r_speed = REWARD_CONFIG.SPEED_WEIGHT * max(0.0, self.vx / REWARD_CONFIG.SPEED_NORMALIZER)
+        # B. Pure Velocity Incentive (Only rewarded when driving within safe road corridor)
+        corridor_factor = math.exp(-0.5 * (d_center / 5.0) ** 2)
+        r_speed = REWARD_CONFIG.SPEED_WEIGHT * max(0.0, self.vx / REWARD_CONFIG.SPEED_NORMALIZER) * corridor_factor * progress_mult
 
-        # C. Smooth Gaussian Centerline Keeping (Center = 1.0, Edge = ~0.0)
-        r_center = REWARD_CONFIG.CENTERLINE_WEIGHT * math.exp(-0.5 * (d_center / 5.0) ** 2)
+        # C. Road Staying Reward & Smooth Gaussian Centerline Keeping
+        r_road_stay = 0.0
+        r_off_road = 0.0
+        if d_center <= ROAD_CONFIG.HALF_WIDTH:
+            r_road_stay = REWARD_CONFIG.ROAD_STAY_REWARD
+            r_center = REWARD_CONFIG.CENTERLINE_WEIGHT * math.exp(-0.5 * (d_center / 3.5) ** 2)
+        else:
+            r_center = 0.0
+            r_off_road = REWARD_CONFIG.OFF_ROAD_BASE_PENALTY + REWARD_CONFIG.OFF_ROAD_PENALTY_SCALE * (d_center - ROAD_CONFIG.HALF_WIDTH)
 
-        # D. Target Heading Guidance (Points towards target beacon)
-        r_target_align = REWARD_CONFIG.TARGET_HEADING_WEIGHT * (1.0 - abs(norm_h_err))
+        # D. Target Heading Guidance (Points directly towards target beacon coordinates)
+        r_target_align = REWARD_CONFIG.TARGET_HEADING_WEIGHT * (1.0 - abs(norm_h_err)) if not self.is_airborne else 0.0
 
-        # E. Target Arrival Bonus: Triggers if within 8m OR if car has passed waypoint longitudinally
+        # E. PHYSICAL Checkpoint Coordinate Touch:
+        # STRICT REQUIREMENT: Car must physically reach within TARGET_ARRIVAL_RADIUS (5.0m) of the target point
+        # AND must be on the ground (NOT airborne!).
         r_reach = 0.0
-        if (curr_target_dist < REWARD_CONFIG.TARGET_ARRIVAL_RADIUS) or (self.pos_x >= self.target_x - 2.0):
+        is_physical_touch = (curr_target_dist <= REWARD_CONFIG.TARGET_ARRIVAL_RADIUS) and (not self.is_airborne)
+
+        if is_physical_touch:
             r_reach = REWARD_CONFIG.TARGET_ARRIVAL_BONUS
-            # Immediately sample next forward waypoint along the road corridor
+            self.target_x, self.target_y, self.target_z = self.target_mgr.sample_forward_target(
+                self.pos_x, self.seed_val
+            )
+            _, _, _, norm_h_err, curr_target_dist = self.target_mgr.compute_normalized_target_features(
+                self.pos_x, self.pos_y, self.pos_z, self.yaw,
+                self.target_x, self.target_y, self.target_z
+            )
+        elif (self.pos_x > self.target_x + 5.0) and (curr_target_dist > REWARD_CONFIG.TARGET_ARRIVAL_RADIUS):
+            # Target missed! Penalize and advance to next forward target
+            r_reach = REWARD_CONFIG.TARGET_MISS_PENALTY
             self.target_x, self.target_y, self.target_z = self.target_mgr.sample_forward_target(
                 self.pos_x, self.seed_val
             )
@@ -304,36 +339,55 @@ class CarDashEnv(gym.Env):
                 self.target_x, self.target_y, self.target_z
             )
 
-        # F. Standstill & Reverse Penalty (Eliminates Lazy Agent camping exploit)
+        # F. Standstill & Reverse Penalty
         r_standstill = REWARD_CONFIG.STANDSTILL_PENALTY if self.vx < 2.0 else 0.0
         r_reverse = REWARD_CONFIG.REVERSE_PENALTY if self.vx < -0.5 else 0.0
 
-        # G. Off-Road Penalty
-        r_off_road = 0.0
-        if d_center > ROAD_CONFIG.HALF_WIDTH:
-            r_off_road = REWARD_CONFIG.OFF_ROAD_PENALTY_SCALE * (d_center - ROAD_CONFIG.HALF_WIDTH)
+        # G. Anti-Spin / Anti-Circle Penalty (Penalizes pointing away from road direction)
+        road_heading_error = math.acos(max(-1.0, min(1.0, heading_alignment)))
+        r_spin = -10.0 * (road_heading_error / math.pi) if road_heading_error > 0.8 else 0.0
 
-        # H. Tactical Nitro Boost Reward
+        # H. Airborne Penalty (Heavy punishment for leaving the ground / jumping)
+        r_airborne = REWARD_CONFIG.AIRBORNE_PENALTY if self.is_airborne else 0.0
+
+        # I. Tactical Nitro Boost Reward: ONLY when firmly on road tarmac (d_center < 4.0m) and road is straight
         r_boost = 0.0
-        if is_boosting and (self.vx > 25.0) and (d_center < 6.0) and (abs(norm_h_err) < 0.20):
-            r_boost = REWARD_CONFIG.TACTICAL_BOOST_REWARD
+        if is_boosting:
+            if (not self.is_airborne) and (self.vx > 25.0) and (d_center < 4.0) and (abs(norm_h_err) < 0.12):
+                r_boost = REWARD_CONFIG.TACTICAL_BOOST_REWARD
+            elif self.is_airborne or (d_center > 6.0):
+                r_boost = -4.0  # Penalize firing nitro near edge, off-road or in mid-air
 
-        # I. Action Smoothness Penalty (Eliminates Jitter)
+        # J. Action Smoothness Penalty (Eliminates Jitter)
         r_jerk = (
             REWARD_CONFIG.STEER_JERK_PENALTY * (steer_in - self.prev_steer) ** 2
             + REWARD_CONFIG.THROTTLE_JERK_PENALTY * (throttle_in - self.prev_throttle) ** 2
         )
 
-        step_reward = float(r_fwd_prog + r_speed + r_center + r_target_align + r_reach + r_boost + r_standstill + r_reverse + r_off_road - r_jerk)
+        step_reward = float(r_fwd_prog + r_speed + r_road_stay + r_center + r_target_align + r_reach + r_boost + r_standstill + r_reverse + r_spin + r_off_road + r_airborne - r_jerk)
 
         # Termination & Truncation
         terminated = False
         truncated = self.step_count >= 2000
 
-        # Off-road severe crash termination (Generous boundary margin)
+        # 1. Off-road severe crash termination (Immediate failure if leaving tarmac boundary)
         if d_center > ROAD_CONFIG.CRASH_BOUNDARY_OFFSET:
             terminated = True
             step_reward = REWARD_CONFIG.CRASH_PENALTY
+
+        # 2. Fatal backward spinout termination (facing backwards > 115 degrees)
+        if road_heading_error > 2.0:
+            terminated = True
+            step_reward = REWARD_CONFIG.CRASH_PENALTY
+
+        # 3. Airborne jumping termination: prolonged flight (> 15 steps / 0.25s) is treated as a fatal crash
+        if self.is_airborne:
+            self.airborne_steps += 1
+            if self.airborne_steps > 15:
+                terminated = True
+                step_reward = REWARD_CONFIG.AIRBORNE_CRASH_PENALTY
+        else:
+            self.airborne_steps = 0
 
         # Update previous state cache
         self.prev_steer = steer_in

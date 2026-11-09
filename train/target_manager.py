@@ -65,9 +65,10 @@ class TargetManager:
         disp_z = raw_z - road_z
         lateral_offset = disp_x * norm_x + disp_z * norm_z
 
-        # 4. Check if point is outside the road (lateral distance > half_width)
-        if abs(lateral_offset) > self.half_width:
-            clamped_offset = (1.0 if lateral_offset > 0 else -1.0) * self.half_width
+        # 4. Check if point is outside comfortable corridor (lateral distance > half_width * 0.75)
+        corridor_limit = self.half_width * 0.75
+        if abs(lateral_offset) > corridor_limit:
+            clamped_offset = (1.0 if lateral_offset > 0 else -1.0) * corridor_limit
             target_x = t + clamped_offset * norm_x
             target_z = road_z + clamped_offset * norm_z
         else:
@@ -81,19 +82,18 @@ class TargetManager:
         self,
         car_x: float,
         seed: float,
-        min_dist: float = 80.0,
-        max_dist: float = 220.0
+        min_dist: float = 50.0,
+        max_dist: float = 130.0
     ) -> Tuple[float, float, float]:
         """
         Generates a forward waypoint along the road corridor.
-        Includes deliberate off-road lateral noise to test surface projection.
+        Samples within drivable corridor (+-8.5m) matching three.jsx.
         """
         dist = random.uniform(min_dist, max_dist)
         target_x = car_x + dist
         road_z, _ = get_procedural_road_curve(target_x, seed)
 
-        # Deliberately sample lateral jitter ([-35m, 35m]) to exercise clamping to +-16m
-        lateral_jitter = random.uniform(-35.0, 35.0)
+        lateral_jitter = random.uniform(-8.5, 8.5)
         raw_z = road_z + lateral_jitter
 
         return self.project_to_nearest_road_point(target_x, raw_z, seed)

@@ -507,13 +507,14 @@ export function projectToNearestRoadPoint(rawX, rawZ, seed = 1170.0, roadHalfWid
 /**
  * Samples a random target ahead along the road corridor with lateral offset.
  */
-export function sampleForwardRoadTarget(carX, seed = 1170.0, roadHalfWidth = 16.0, minDist = 80.0, maxDist = 220.0) {
+export function sampleForwardRoadTarget(carX, seed = 1170.0, roadHalfWidth = 16.0, minDist = 50.0, maxDist = 130.0) {
     const dist = minDist + Math.random() * (maxDist - minDist);
     const targetX = carX + dist;
     const road = getProceduralRoadCurve(targetX, seed);
-    const lateralJitter = (Math.random() * 2.0 - 1.0) * 35.0; // Deliberate jitter to exercise projection
+    // Sample within comfortable drivable corridor (+-8.5m) so car can physically touch it directly
+    const lateralJitter = (Math.random() * 2.0 - 1.0) * 8.5;
     const rawZ = road.z + lateralJitter;
-    return projectToNearestRoadPoint(targetX, rawZ, seed, roadHalfWidth);
+    return projectToNearestRoadPoint(targetX, rawZ, seed, roadHalfWidth * 0.75);
 }
 
 /**

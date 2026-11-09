@@ -406,7 +406,7 @@ function ThreeScene() {
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.shadowMap.enabled = true;
-        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.shadowMap.type = THREE.PCFShadowMap;
         container.appendChild(renderer.domElement);
 
         // Ensure canvas has focus so keyboard input works immediately
@@ -466,11 +466,13 @@ function ThreeScene() {
         scene.add(targetBeacon.mesh);
         let currentTarget = sampleForwardRoadTarget(0.0, groundParamsRef.current.seed);
         targetCoordRef.current = currentTarget;
+        let targetTimer = 0.0;
 
         const handleNewTarget = () => {
             const carPos = carBody ? carBody.translation() : { x: 0 };
             currentTarget = sampleForwardRoadTarget(carPos.x, groundParamsRef.current.seed);
             targetCoordRef.current = currentTarget;
+            targetTimer = 0.0;
         };
         window.addEventListener('car:new-target', handleNewTarget);
 
@@ -522,12 +524,14 @@ function ThreeScene() {
         const lidarMaterial = new THREE.LineBasicMaterial({
             vertexColors: true,
             transparent: true,
-            opacity: 0.95,
-            depthTest: false
+            opacity: 1.0,
+            depthTest: false,
+            depthWrite: false
         });
         const lidarLines = new THREE.LineSegments(lidarGeometry, lidarMaterial);
         lidarLines.renderOrder = 998;
         lidarLines.visible = false;
+        lidarLines.frustumCulled = false;
         scene.add(lidarLines);
 
         // 8. Respawn Function Helper (Spawns settled flush on ground with zero drop bounce)
@@ -558,6 +562,9 @@ function ThreeScene() {
             visualRollAngle = 0;
             currentSpeedBlur = 0;
             if (speedBlurRef.current) speedBlurRef.current.style.opacity = '0';
+            currentTarget = sampleForwardRoadTarget(0.0, groundParamsRef.current.seed);
+            targetCoordRef.current = currentTarget;
+            targetTimer = 0.0;
         };
 
         const handleCarRespawn = () => {
@@ -581,7 +588,8 @@ function ThreeScene() {
             a: false,
             d: false,
             shift: false,
-            space: false
+            space: false,
+            nitroToggle: false
         };
 
         const handleKeyDown = (e) => {
@@ -593,8 +601,16 @@ function ThreeScene() {
                 e.preventDefault();
             }
 
+            // E: Toggle Nitro Boost Mode ON/OFF (Single press toggles)
+            if (k === 'e' || code === 'KeyE') {
+                keys.nitroToggle = !keys.nitroToggle;
+                if (keys.nitroToggle && keys.w) {
+                    screenShakePunch = 0.045;
+                }
+            }
+
             if (k === 'w' || code === 'KeyW' || k === 'arrowup' || code === 'ArrowUp') {
-                if (!keys.w && keys.shift) {
+                if (!keys.w && (keys.shift || keys.nitroToggle)) {
                     screenShakePunch = 0.045;
                 }
                 keys.w = true;
@@ -833,54 +849,92 @@ function ThreeScene() {
             const delta = Math.min((now - lastTime) / 1000, 0.05);
             lastTime = now;
 
+            let isShiftBoosting = false;
+            let currentCarSpeed = 0.0;
+
+            let carPos = { x: 0, y: 0, z: 0 };
+            let terrainH = 0.0;
+            let groundClearance = 0.0;
+            let isAirborne = false;
+
+            if (carBody) {
+                try {
+                    carPos = carBody.translation();
+                } catch {
+                    carPos = { x: 0, y: 0, z: 0 };
+                }
+            }
+
             if (ground) {
-                const carPos = carBody ? carBody.translation() : { x: 0, z: 0 };
                 ground.update(carPos, delta, directionalLight.position, directionalLight.color, ambientLight.color);
+                terrainH = ground.getHeightAt(carPos.x, carPos.z);
+                groundClearance = carPos.y - terrainH;
+                isAirborne = groundClearance > 0.45;
             }
 
             if (road && carBody) {
-                road.update(carBody.translation());
+                road.update(carPos);
             }
 
             if (world) {
                 if (carBody) {
-                    const rot = carBody.rotation();
-                    const carQuat = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
+                    let rot, carQuat, linvel;
+                    try {
+                        rot = carBody.rotation();
+                        carQuat = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
+                        linvel = carBody.linvel();
+                    } catch {
+                        return; // Safely skip frame if physics body is being reconstructed
+                    }
 
                     // Local car axes (+X is forward, +Z is right, +Y is up)
                     const forward = new THREE.Vector3(1, 0, 0).applyQuaternion(carQuat);
                     const lateral = new THREE.Vector3(0, 0, 1).applyQuaternion(carQuat);
                     const up = new THREE.Vector3(0, 1, 0).applyQuaternion(carQuat);
-
-                    const linvel = carBody.linvel();
                     const currentVel = new THREE.Vector3(linvel.x, linvel.y, linvel.z);
 
                     const forwardSpeed = currentVel.dot(forward);
                     const lateralSpeed = currentVel.dot(lateral);
                     const absSpeed = Math.abs(forwardSpeed);
+                    currentCarSpeed = absSpeed;
                     const speedKmh = absSpeed * 3.6;
 
                     // Target Beacon update & arrival detection
                     let localDx = 0;
                     let localDz = 0;
+                    let tdist = 100.0;
                     if (targetBeacon) {
                         targetBeacon.updatePosition(currentTarget.x, currentTarget.y, currentTarget.z);
                         targetBeacon.animate(delta);
 
-                        const carPos = carBody.translation();
                         const carYaw = Math.atan2(forward.z, forward.x);
                         const tdx = currentTarget.x - carPos.x;
                         const tdz = currentTarget.z - carPos.z;
-                        const tdist = Math.hypot(tdx, tdz);
+                        tdist = Math.hypot(tdx, tdz);
                         targetDistRef.current = tdist;
 
                         localDx = tdx * Math.cos(carYaw) + tdz * Math.sin(carYaw);
                         localDz = -tdx * Math.sin(carYaw) + tdz * Math.cos(carYaw);
 
-                        // Advance target if within 8.0m OR if car has passed the waypoint longitudinally
-                        if (tdist < 8.0 || localDx < 4.0 || (currentTarget.x - carPos.x) < 2.0) {
+                        targetTimer += delta;
+
+                        // Continuous Checkpoint Hit & Gate Traversal Detection:
+                        // 1. Physical Touch: Car body intersects beacon radius (beacon radius 4.5m + car radius 2.2m)
+                        const isCloseTouch = tdist <= 5.8;
+                        // 2. Traversed checkpoint gate: car passes through checkpoint transverse plane within 5.0m lateral offset
+                        const isPlaneTraversed = (carPos.x >= currentTarget.x - 1.2) && (carPos.x <= currentTarget.x + 3.5) && (Math.abs(localDz) <= 5.0);
+                        const isCheckpointHit = (isCloseTouch || isPlaneTraversed) && !isAirborne;
+
+                        if (isCheckpointHit) {
+                            targetBeacon.triggerHit();
+                            currentTarget = sampleForwardRoadTarget(currentTarget.x, groundParamsRef.current.seed);
+                            targetCoordRef.current = currentTarget;
+                            targetTimer = 0.0;
+                        } else if (carPos.x > currentTarget.x + 18.0) {
+                            // Only advance to next forward target if car has cleanly passed >18m beyond waypoint along +X
                             currentTarget = sampleForwardRoadTarget(carPos.x, groundParamsRef.current.seed);
                             targetCoordRef.current = currentTarget;
+                            targetTimer = 0.0;
                         }
 
                         // Assemble complete 30-D Observation Space (Section 4 of plan.md)
@@ -976,11 +1030,11 @@ function ThreeScene() {
                     const hasSteerInput = Math.abs(currentSteerAngle) > 0.05;
                     const isHandbrake = keys.space;
                     const isBrakeDrift = keys.s && forwardSpeed > 4.0 && hasSteerInput;
-                    const isPowerSlide = (keys.shift && keys.w && hasSteerInput && speedKmh > 20.0) || (hasSteerInput && speedKmh > 36.0);
+                    const isPowerSlide = ((keys.shift || keys.nitroToggle) && keys.w && hasSteerInput && speedKmh > 20.0) || (hasSteerInput && speedKmh > 36.0);
                     const isAlreadySliding = Math.abs(lateralSpeed) > 1.3 && absSpeed > 3.0;
 
                     let wantsDrift = false;
-                    if (driftEnabled && absSpeed > 2.0) {
+                    if (driftEnabled && absSpeed > 2.0 && !aiDriverActiveRef.current) {
                         if (isHandbrake || isBrakeDrift || isPowerSlide || isAlreadySliding) {
                             wantsDrift = true;
                         }
@@ -1018,65 +1072,123 @@ function ThreeScene() {
                     // 2. Acceleration / Braking / Fast Reverse (W & S)
                     let wantsW = keys.w;
                     let wantsS = keys.s;
-                    let wantsShift = keys.shift;
+                    let wantsShift = keys.shift || keys.nitroToggle;
                     let aiSteerFactor = 0.0;
                     let isAiDriven = false;
+                    let aiIsBoosting = false;
+
+                    // Analytical road curvature helper: kappa = |d2z| / (1 + dz^2)^1.5
+                    const getCurvatureAt = (x, seed) => {
+                        const rL = getProceduralRoadCurve(x - 1.0, seed);
+                        const rR = getProceduralRoadCurve(x + 1.0, seed);
+                        const d2z = (rR.dz - rL.dz) * 0.5;
+                        return Math.abs(d2z) / Math.pow(1.0 + rL.dz * rL.dz, 1.5);
+                    };
 
                     if (aiDriverActiveRef.current && carBody) {
                         isAiDriven = true;
                         const carPos = carBody.translation();
                         const carYaw = Math.atan2(forward.z, forward.x);
+                        const seed = groundParamsRef.current.seed;
 
-                        // 1. Dynamic Lookahead along Road Curve (Adapts in real-time to any seed)
-                        const speedLookahead = THREE.MathUtils.clamp(forwardSpeed * 0.95, 12.0, 50.0);
-                        const lookX = carPos.x + speedLookahead;
-                        const roadAtLook = getProceduralRoadCurve(lookX, groundParamsRef.current.seed);
+                        // 1. Current Road Centerline & Tangent at Car
+                        const roadAtCar = getProceduralRoadCurve(carPos.x, seed);
+                        const lateralDeviation = carPos.z - roadAtCar.z; // + = right of center (+Z), - = left of center (-Z)
+                        const absLatDev = Math.abs(lateralDeviation);
+                        const roadTangent = Math.atan2(roadAtCar.dz, 1.0);
 
-                        // Signed lateral offset from road centerline (normalized to 16m)
-                        const lateralOffset = THREE.MathUtils.clamp((roadAtLook.z - carPos.z) / 16.0, -1.0, 1.0);
-                        const roadTangent = Math.atan2(roadAtLook.dz, 1.0);
-                        const tangentHeadingErr = roadTangent - carYaw;
+                        // Normalize angle difference to [-PI, PI]
+                        const normAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+                        const tangentHeadingErr = normAngle(roadTangent - carYaw);
 
-                        // Target Beacon Heading in Car local frame
-                        const tHeading = Math.atan2(localDz, Math.max(localDx, 2.0));
+                        // 2. High-Speed Curvature Velocity Profile (Maximizes Achievable Speed on Road)
+                        // With high-speed aerodynamic downforce, chassis supports up to ~24.0 m/s^2 (~2.45g) cornering
+                        const MAX_LAT_ACCEL = 24.0;
+                        let safeTargetSpeed = BOOST_FORWARD_SPEED; // 100 m/s (~360 km/h) max on long straights
 
-                        // 2. High-Speed Curve Curvature Anticipation
-                        const nextRoad = getProceduralRoadCurve(lookX + 30.0, groundParamsRef.current.seed);
-                        const roadCurvature = Math.abs(nextRoad.dz - roadAtLook.dz);
+                        // Lookahead horizon: scan upcoming road curvature up to 90m ahead in road corridor
+                        const scanOffsets = [0.0, 10.0, 22.0, 36.0, 52.0, 70.0, 90.0];
+                        for (let i = 0; i < scanOffsets.length; i++) {
+                            const distAhead = scanOffsets[i];
+                            const scanX = carPos.x + distAhead;
+                            const kappa = getCurvatureAt(scanX, seed);
 
-                        // 3. Precision Steering Authority (Centerline + Tangent + Target Guidance)
-                        let targetSteering = tangentHeadingErr * 1.55 + lateralOffset * 0.55 + tHeading * 0.35;
-                        if (onnxSession && aiActionOutput) {
-                            const modelSteer = THREE.MathUtils.clamp(aiActionOutput[0], -1.0, 1.0);
-                            targetSteering = THREE.MathUtils.lerp(targetSteering, modelSteer, 0.35);
+                            // Safe cornering speed at that curvature: v_safe = sqrt(a_lat / kappa)
+                            // Minimum 32.0 m/s (~115 km/h) even on tight bends, up to 100 m/s on straights
+                            const safeTurnSpeed = kappa > 0.001
+                                ? THREE.MathUtils.clamp(Math.sqrt(MAX_LAT_ACCEL / kappa), 32.0, BOOST_FORWARD_SPEED)
+                                : BOOST_FORWARD_SPEED;
+
+                            // Kinematic braking profile (18 m/s^2 comfortable deceleration):
+                            // v_current_max = sqrt(v_safe^2 + 2 * a_brake * distAhead)
+                            const allowedSpeed = Math.sqrt(safeTurnSpeed * safeTurnSpeed + 2.0 * 18.0 * distAhead);
+                            if (allowedSpeed < safeTargetSpeed) {
+                                safeTargetSpeed = allowedSpeed;
+                            }
                         }
-                        aiSteerFactor = THREE.MathUtils.clamp(targetSteering, -1.0, 1.0);
 
-                        // 4. Maximum Velocity & Tactical Nitro Boost Controller
-                        // Straight stretches -> FULL NITRO BOOST (~360 km/h) to reach target in record time!
-                        // Sharp mountain bends -> Controlled apex braking
-                        const isStraight = (roadCurvature < 0.28) && (Math.abs(lateralOffset) < 0.35) && (Math.abs(tangentHeadingErr) < 0.22);
-                        const isSharpCurve = (roadCurvature > 0.55) || (Math.abs(lateralOffset) > 0.65);
+                        // 3. Anti-Circling & Anti-Donut Safeguard
+                        // If heading deviates > 75 degrees (0.42 * PI) from road tangent, car has spun or is sliding sideways!
+                        const isFacingBackward = Math.abs(tangentHeadingErr) > (Math.PI * 0.42);
 
+                        let targetSteering = 0;
                         let targetThrottle = 1.0;
                         let targetShift = false;
 
-                        if (isStraight && forwardSpeed > 18.0) {
-                            targetThrottle = 1.0;
-                            targetShift = true; // Tactical Nitro Boost on straights!
-                        } else if (isSharpCurve && forwardSpeed > 30.0) {
-                            targetThrottle = -0.45; // Smooth deceleration into sharp apex
+                        if (isFacingBackward) {
+                            // IMMEDIATE RECOVERY: break donut / spin loop instantly!
+                            // Counter-steer firmly toward road tangent (direction of road down +X)
+                            targetSteering = THREE.MathUtils.clamp(tangentHeadingErr * 1.4, -0.65, 0.65);
+                            // Reverse or cut throttle to stop spinning momentum
+                            targetThrottle = forwardSpeed > 1.0 ? -0.8 : 0.4;
                             targetShift = false;
+                            aiIsBoosting = false;
+                        } else if (isAirborne) {
+                            // Airborne: cut throttle to land smoothly flush with road
+                            targetThrottle = 0.0;
+                            targetShift = false;
+                            aiIsBoosting = false;
+                            targetSteering = THREE.MathUtils.clamp(-lateralDeviation / 6.0, -0.5, 0.5);
                         } else {
-                            targetThrottle = 1.0; // Full acceleration
-                            targetShift = false;
+                            // 4. AGGRESSIVE SPEED & TURBO NITRO LEVERAGING:
+                            // Keep full throttle engaged to push speeds to the absolute maximum achievable!
+                            targetThrottle = 1.0;
+
+                            // AGGRESSIVELY LEVERAGE TURBO NITRO BOOST:
+                            // Whenever on the road (absLatDev < 12.0m) and pointing generally along the road corridor
+                            const canBoost = (absLatDev < 12.0) && (Math.abs(tangentHeadingErr) < 0.35) && (forwardSpeed > 8.0);
+                            targetShift = canBoost;
+                            aiIsBoosting = canBoost;
+
+                            // Only apply active trail braking when noticeably exceeding safe corner entry speed
+                            if (forwardSpeed > safeTargetSpeed + 3.0) {
+                                targetShift = false;
+                                aiIsBoosting = false;
+                                targetThrottle = -THREE.MathUtils.clamp((forwardSpeed - safeTargetSpeed) / 6.0, 0.3, 1.0);
+                            }
+
+                            // 5. ACTIVE TARGET HUNTING (No Centerline Camping!):
+                            // Directly hunt down the target checkpoint beacon!
+                            const tHeading = Math.atan2(localDz, Math.max(localDx, 1.5));
+
+                            // Edge guard: ONLY intervenes if car approaches outer road shoulder (> 10.5m of 16m)
+                            let edgeGuard = 0.0;
+                            if (absLatDev > 10.5) {
+                                const excess = (absLatDev - 10.5) / 5.5;
+                                edgeGuard = -Math.sign(lateralDeviation) * excess * 0.75;
+                            }
+
+                            // Steer aggressively toward target beacon + road tangent flow
+                            targetSteering = tHeading * 1.35 + tangentHeadingErr * 0.65 + edgeGuard;
+
+                            // 6. Neural Network Model Action Blending (when ONNX model is available and running)
+                            if (onnxSession && aiActionOutput && absLatDev < 12.0) {
+                                const modelSteer = THREE.MathUtils.clamp(aiActionOutput[0], -1.0, 1.0);
+                                targetSteering = THREE.MathUtils.lerp(targetSteering, modelSteer, 0.25);
+                            }
                         }
 
-                        // Guaranteed Forward Motion: NEVER STOP, NEVER REVERSE
-                        if (forwardSpeed < 12.0) {
-                            targetThrottle = 1.0;
-                            targetShift = false;
-                        }
+                        aiSteerFactor = THREE.MathUtils.clamp(targetSteering, -1.0, 1.0);
 
                         const speedCap = targetShift ? BOOST_FORWARD_SPEED : NORMAL_FORWARD_SPEED;
                         const accelBase = targetShift ? BOOST_ACCEL_FORCE : NORMAL_ACCEL_FORCE;
@@ -1163,9 +1275,11 @@ function ThreeScene() {
 
                     let targetSteer = 0;
                     if (aiDriverActiveRef.current) {
-                        // Inverted sign to match Three.js coordinate system (A = +left, D = -right)
-                        // Uses 0.40 rad max steer matching RL training environment
-                        targetSteer = -aiSteerFactor * 0.40;
+                        // Speed-adaptive steering lock for AI: full 0.40 rad (~23 deg) at low speed,
+                        // tapering smoothly to 0.18 rad (~10.3 deg) at 360 km/h for responsive target interception
+                        const aiSpeedRatio = THREE.MathUtils.clamp((forwardSpeed - 15.0) / 75.0, 0.0, 1.0);
+                        const maxAiSteer = THREE.MathUtils.lerp(0.40, 0.18, aiSpeedRatio);
+                        targetSteer = -aiSteerFactor * maxAiSteer;
                     } else {
                         if (keys.a) targetSteer = maxSteerAngle;
                         if (keys.d) targetSteer = -maxSteerAngle;
@@ -1186,7 +1300,9 @@ function ThreeScene() {
 
                     let targetYawRate = 0;
                     if (absSpeed > 0.15) {
-                        const maxYawRate = aiDriverActiveRef.current ? 3.0 : THREE.MathUtils.damp(2.2, 1.0, 3.0, THREE.MathUtils.clamp(speedKmh / 90, 0, 1));
+                        const maxYawRate = aiDriverActiveRef.current
+                            ? THREE.MathUtils.lerp(3.2, 1.3, THREE.MathUtils.clamp((forwardSpeed - 20.0) / 70.0, 0.0, 1.0))
+                            : THREE.MathUtils.damp(2.2, 1.0, 3.0, THREE.MathUtils.clamp(speedKmh / 90, 0, 1));
                         const kinematicYaw = (forwardSpeed / WHEELBASE) * Math.tan(currentSteerAngle);
 
                         if (currentDriftFactor > 0.05 && !aiDriverActiveRef.current) {
@@ -1251,10 +1367,11 @@ function ThreeScene() {
                         wheel.rotateX(rollDelta);
                     });
 
-                    // 4b. High-Speed Aerodynamic Downforce (Keeps car firmly planted on terrain, prevents bouncing at 100+ km/h)
-                    const downforceFactor = tyreParamsRef.current.highSpeedDownforce ?? 1.8;
-                    if (absSpeed > 5.0 && downforceFactor > 0) {
-                        const downforce = (absSpeed * absSpeed) * downforceFactor * CAR_MASS * 0.0012;
+                    // 4b. High-Speed Aerodynamic Downforce & Active Crest Retention
+                    // Keeps car firmly planted on terrain, prevents bouncing and launching into the air at high speeds!
+                    const downforceFactor = tyreParamsRef.current.highSpeedDownforce ?? 2.4;
+                    if (absSpeed > 4.0 && downforceFactor > 0) {
+                        const downforce = (absSpeed * absSpeed) * downforceFactor * CAR_MASS * 0.0014;
                         carBody.applyImpulse({
                             x: -up.x * downforce * delta,
                             y: -up.y * downforce * delta,
@@ -1262,21 +1379,26 @@ function ThreeScene() {
                         }, true);
                     }
 
-                    // 4c. Vertical Bounce Absorption (Suspension shock absorption when driving fast over rough terrain)
-                    const bounceDamperVal = tyreParamsRef.current.bounceDamper ?? 1.2;
+                    // 4c. Active Hill-Hug Suction:
+                    // If the chassis starts lifting above 0.08m, apply strong downward spring impulse to prevent airborne ski-jump launches!
+                    if (ground && groundClearance > 0.08) {
+                        const liftExcess = groundClearance - 0.08;
+                        const suction = THREE.MathUtils.clamp(liftExcess * 50.0, 0.0, 65.0) * CAR_MASS;
+                        carBody.applyImpulse({ x: 0, y: -suction * delta, z: 0 }, true);
+                    }
+
+                    // 4d. Vertical Bounce Absorption (Suspension shock absorption when driving fast over rough terrain)
+                    const bounceDamperVal = tyreParamsRef.current.bounceDamper ?? 1.4;
                     if (bounceDamperVal > 0 && ground) {
-                        const carTrans = carBody.translation();
-                        const groundH = ground.getHeightAt(carTrans.x, carTrans.z);
-                        const groundClearance = carTrans.y - groundH;
-                        // When near the terrain surface (< 0.65m) and experiencing sudden upward bounce (> 0.20 m/s)
-                        if (groundClearance < 0.65 && linvel.y > 0.20) {
-                            const reboundImpulse = linvel.y * CAR_MASS * Math.min(8.0 * bounceDamperVal * delta, 0.45);
+                        // When near terrain surface and experiencing upward vertical bounce
+                        if (linvel.y > 0.15) {
+                            const reboundImpulse = linvel.y * CAR_MASS * Math.min(10.0 * bounceDamperVal * delta, 0.60);
                             carBody.applyImpulse({ x: 0, y: -reboundImpulse, z: 0 }, true);
                         }
                     }
 
-                    // 5. Dynamic Camera FOV with smooth damping (Gentle 78° on Shift+W for high-speed sensation)
-                    const isShiftBoosting = keys.shift && keys.w;
+                    // 5. Dynamic Camera FOV with smooth damping (Gentle 78° on Shift/E + W for high-speed sensation)
+                    isShiftBoosting = (wantsShift && wantsW) || (aiDriverActiveRef.current && aiIsBoosting);
                     const targetFov = isShiftBoosting ? 78 : 75;
                     camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 1.4, delta);
                     camera.updateProjectionMatrix();
@@ -1304,21 +1426,24 @@ function ThreeScene() {
 
                     if (nitroBadgeRef.current) {
                         if (isShiftBoosting) {
-                            nitroBadgeRef.current.innerText = '🔥 TURBO ACTIVE';
+                            nitroBadgeRef.current.innerText = '🔥 TURBO ACTIVE (360 KM/H)';
                             nitroBadgeRef.current.className = 'text-[11px] font-bold px-2 py-0.5 rounded-md font-mono bg-gradient-to-r from-amber-500 to-orange-500 text-black font-extrabold shadow-[0_0_15px_rgba(245,158,11,0.9)] animate-pulse';
+                        } else if (keys.nitroToggle) {
+                            nitroBadgeRef.current.innerText = '⚡ [E] NITRO ON (HOLD W)';
+                            nitroBadgeRef.current.className = 'text-[11px] font-bold px-2 py-0.5 rounded-md font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_10px_rgba(245,158,11,0.4)] animate-pulse';
                         } else if (keys.shift) {
                             nitroBadgeRef.current.innerText = '⚡ HOLD W TO BOOST';
                             nitroBadgeRef.current.className = 'text-[11px] font-bold px-2 py-0.5 rounded-md font-mono bg-cyan-500/20 text-cyan-300 border border-cyan-500/40';
                         } else {
-                            nitroBadgeRef.current.innerText = 'HOLD SHIFT';
-                            nitroBadgeRef.current.className = 'text-[11px] font-bold px-2 py-0.5 rounded-md font-mono text-neutral-400 bg-white/5';
+                            nitroBadgeRef.current.innerText = '[E] TOGGLE NITRO';
+                            nitroBadgeRef.current.className = 'text-[11px] font-bold px-2 py-0.5 rounded-md font-mono text-neutral-400 bg-white/5 border border-white/10';
                         }
                     }
                 }
 
                 // Step physics simulation with adaptive substepping at high speeds to prevent tunnelling and terrain bounce
-                const isHighSpeed = keys.shift && keys.w;
-                const subSteps = isHighSpeed ? 2 : 1;
+                const isHighSpeed = isShiftBoosting || currentCarSpeed > 35.0;
+                const subSteps = isHighSpeed ? (currentCarSpeed > 70.0 ? 3 : 2) : 1;
                 world.timestep = delta / subSteps;
                 for (let s = 0; s < subSteps; s++) {
                     world.step();
@@ -1339,6 +1464,7 @@ function ThreeScene() {
                     const forwardSpeed = currentVel.dot(forward);
                     const lateralSpeed = currentVel.dot(lateral);
                     const absSpeed = Math.abs(forwardSpeed);
+                    currentCarSpeed = absSpeed;
                     const speedKmh = absSpeed * 3.6;
                     const isDrifting = currentDriftFactor > 0.18 && (Math.abs(lateralSpeed) > 0.5 || keys.space) && absSpeed > 1.8;
 
@@ -1424,7 +1550,6 @@ function ThreeScene() {
                     }
 
                     // Dynamic camera follow distance: exactly 20% further back on Shift + W with slow, smooth damping
-                    const isShiftBoosting = keys.shift && keys.w;
                     const targetDist = isShiftBoosting ? userZoomDist * 1.20 : userZoomDist;
                     const targetHeight = isShiftBoosting ? 2.22 : 2.1;
                     currentFollowDist = THREE.MathUtils.damp(currentFollowDist, targetDist, 1.2, delta);
@@ -1660,41 +1785,6 @@ function ThreeScene() {
                 style={{ background: 'radial-gradient(circle at center, transparent 40%, rgba(0,0,0,0.6) 100%)' }}
             />
 
-            {/* Top-Left Telemetry & Autonomous Navigation Mode HUD */}
-            <div className="absolute top-6 left-6 z-10 pointer-events-none flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                    <div
-                        ref={aiBadgeRef}
-                        className={`px-3.5 py-1.5 rounded-full text-xs font-mono font-bold tracking-wider backdrop-blur-md border shadow-lg ${
-                            aiDriverActive
-                                ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50 shadow-[0_0_20px_rgba(16,185,129,0.35)] animate-pulse'
-                                : 'bg-neutral-900/80 text-neutral-400 border-white/10'
-                        }`}
-                    >
-                        {aiDriverActive ? '🤖 AI AUTONOMOUS PILOT: ENGAGED' : '🏎️ MANUAL CONTROL [KEY T: ENGAGE AI]'}
-                    </div>
-                    <div
-                        ref={targetBadgeRef}
-                        className="px-3.5 py-1.5 rounded-full text-xs font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 backdrop-blur-md shadow-lg"
-                    >
-                        🎯 WAYPOINT: {Math.round(targetDistRef.current)}m
-                    </div>
-                </div>
-            </div>
-
-            {/* Bottom-Left Dashboard Gauge */}
-            <div className="absolute bottom-6 left-6 z-10 pointer-events-none flex items-end gap-4">
-                <div className="px-5 py-3 rounded-2xl bg-neutral-900/85 backdrop-blur-md border border-white/15 shadow-2xl flex flex-col min-w-[140px]">
-                    <div className="flex items-baseline gap-2">
-                        <span ref={speedRef} className="text-4xl font-mono font-black text-white tracking-tight">0</span>
-                        <span className="text-xs font-mono font-bold text-neutral-400 uppercase">KM/H</span>
-                    </div>
-                    <div className="mt-1 flex items-center justify-between gap-3">
-                        <span ref={gearRef} className="text-xs font-mono font-bold text-emerald-400">NEUTRAL</span>
-                        <span ref={nitroBadgeRef} className="text-[10px] font-bold px-2 py-0.5 rounded-md font-mono text-neutral-400 bg-white/5">HOLD SHIFT</span>
-                    </div>
-                </div>
-            </div>
 
             {/* Bottom-Right Seeded Perlin Noise Radar Mini-Map */}
             {groundParams.showRadar && (
