@@ -64,6 +64,16 @@ export function createTargetBeacon() {
         updatePosition(x, y, z) {
             group.position.set(x, y, z);
         },
+        triggerHit() {
+            // Rapid celebratory touch explosion
+            ringMat.color.setHex(0xffe600);
+            beamMat.color.setHex(0xffaa00);
+            ring.scale.set(2.2, 2.2, 1.0);
+            setTimeout(() => {
+                ringMat.color.setHex(0x00ffcc);
+                beamMat.color.setHex(0x00ffcc);
+            }, 350);
+        },
         animate(delta) {
             animationTime += delta;
             // Pulsing scale and breathing opacity

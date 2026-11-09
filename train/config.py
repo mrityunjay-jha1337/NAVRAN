@@ -14,7 +14,7 @@ class RoadConfig:
     """Analytical Road Geometry Constants."""
     ROAD_WIDTH: float = 32.0
     HALF_WIDTH: float = 16.0
-    CRASH_BOUNDARY_OFFSET: float = 22.0   # Generous recovery margin outside tarmac
+    CRASH_BOUNDARY_OFFSET: float = 16.5   # Strict crash boundary: leaving 16m tarmac by >0.5m causes immediate termination
     DEFAULT_SEED: float = 1170.0
     MAX_LOOKAHEAD_DIST: float = 300.0
     RAY_ANGLES_RAD: Tuple[float, ...] = (
@@ -46,6 +46,7 @@ class VehicleConfig:
     STEER_RESPONSE_RATE: float = 12.0       # Steering smoothing factor
     WHEELBASE: float = 2.55                 # Wheelbase length (meters)
     LATERAL_GRIP_DAMPING: float = 0.85      # Lateral tire slip dampening
+    MAX_TIRE_LAT_ACCEL: float = 13.5        # Max lateral cornering acceleration (~1.38g) before centrifugal tire slip
     PHYSICS_DT: float = 1.0 / 60.0          # 60 Hz simulation time-step
     SHIFT_THRESHOLD: float = 0.20           # Action[2] > 0.20 triggers nitro boost
 
@@ -53,30 +54,34 @@ class VehicleConfig:
 @dataclass(frozen=True)
 class RewardConfig:
     """Robust Highway Path-Following & Target Interception Reward Formulation."""
-    FORWARD_PROGRESS_WEIGHT: float = 3.5    # Continuous longitudinal progress along road corridor
+    FORWARD_PROGRESS_WEIGHT: float = 4.0    # Continuous longitudinal progress along road corridor
     SPEED_WEIGHT: float = 2.0               # Positive reward for maintaining high forward velocity
     SPEED_NORMALIZER: float = 45.0          # 45 m/s (~162 km/h) normalizer
-    CENTERLINE_WEIGHT: float = 2.0          # Smooth Gaussian centerline keeping
-    TARGET_HEADING_WEIGHT: float = 1.5      # Guidance alignment towards target beacon
-    TARGET_ARRIVAL_BONUS: float = 50.0      # Dense payout for hitting target
-    TARGET_ARRIVAL_RADIUS: float = 8.0      # Arrival radius threshold (meters)
-    OFF_ROAD_PENALTY_SCALE: float = -4.0    # Penalty per meter outside tarmac boundary
-    STANDSTILL_PENALTY: float = -0.5        # Active penalty for standing still (ELIMINATES LAZY CAMPING)
-    REVERSE_PENALTY: float = -2.0           # Penalty for driving backwards
-    AIRBORNE_REWARD: float = 0.0            # Airborne state is strictly neutral (0.0)
-    TACTICAL_BOOST_REWARD: float = 2.0      # Nitro boost on straight road corridors
+    ROAD_STAY_REWARD: float = 8.0           # Strong direct reward for keeping wheels on tarmac
+    CENTERLINE_WEIGHT: float = 10.0         # High-priority steep Gaussian centerline keeping
+    TARGET_HEADING_WEIGHT: float = 3.0      # Guidance alignment towards target beacon
+    TARGET_ARRIVAL_BONUS: float = 150.0     # Massive bonus for PHYSICALLY touching target coordinates
+    TARGET_MISS_PENALTY: float = -50.0      # Penalty for crossing X without touching target
+    TARGET_ARRIVAL_RADIUS: float = 5.0      # Strict physical touch radius (5.0 meters)
+    OFF_ROAD_BASE_PENALTY: float = -30.0    # Punishing flat penalty as soon as car leaves tarmac
+    OFF_ROAD_PENALTY_SCALE: float = -40.0   # Extreme penalty per meter outside tarmac boundary
+    STANDSTILL_PENALTY: float = -2.0        # Active penalty for standing still (ELIMINATES LAZY CAMPING)
+    REVERSE_PENALTY: float = -5.0           # Penalty for driving backwards
+    AIRBORNE_PENALTY: float = -20.0         # Severe penalty for being airborne / jumping off road
+    AIRBORNE_CRASH_PENALTY: float = -150.0  # Catastrophic penalty if airborne for prolonged steps
+    TACTICAL_BOOST_REWARD: float = 3.0      # Nitro boost ONLY on clean road corridor
     STEER_JERK_PENALTY: float = 0.05        # Smooth steering (dSteer^2)
     THROTTLE_JERK_PENALTY: float = 0.02     # Smooth throttle (dThrottle^2)
-    CRASH_PENALTY: float = -50.0            # Severe off-road crash penalty
+    CRASH_PENALTY: float = -300.0           # Catastrophic off-road crash penalty
 
 
 @dataclass(frozen=True)
 class ModelConfig:
-    """Twin Actor-Critic MLP Architecture Constants."""
+    """Higher-Capacity Twin Actor-Critic MLP Architecture Constants."""
     OBS_DIM: int = 30
     ACTION_DIM: int = 3
-    ACTOR_LAYERS: Tuple[int, ...] = (128, 128, 64)
-    CRITIC_LAYERS: Tuple[int, ...] = (128, 128, 64)
+    ACTOR_LAYERS: Tuple[int, ...] = (256, 256, 128, 64)
+    CRITIC_LAYERS: Tuple[int, ...] = (256, 256, 128, 64)
     USE_LAYER_NORM: bool = True
     ACTIVATION: str = "ELU"
 
@@ -86,7 +91,7 @@ class TrainingConfig:
     """PPO Vectorized Multi-Worker Hyperparameters."""
     NUM_WORKERS: int = 8                    # 8 parallel CPU simulation environments
     N_STEPS: int = 512                      # Rollout steps per env (total batch = 4,096)
-    BATCH_SIZE: int = 128                   # Mini-batch size optimized for RTX 2050 GDDR6
+    BATCH_SIZE: int = 128                   # Mini-batch size optimized for fast convergence
     N_EPOCHS: int = 8                       # PPO optimization epochs per rollout
     LEARNING_RATE: float = 3e-4             # Adam learning rate
     GAMMA: float = 0.995                    # Discount factor
@@ -95,8 +100,8 @@ class TrainingConfig:
     ENT_COEF: float = 0.005                 # Entropy coefficient for exploration
     VF_COEF: float = 0.50                   # Value function loss coefficient
     MAX_GRAD_NORM: float = 0.50             # Gradient clipping threshold
-    TOTAL_TIMESTEPS: int = 2_000_000        # Stage 1 + Stage 2 total steps
-    STAGE_1_TIMESTEPS: int = 400_000        # Centering & basic speed
+    TOTAL_TIMESTEPS: int = 1_000_000        # Stage 1 + Stage 2 total steps
+    STAGE_1_TIMESTEPS: int = 250_000        # Centering & basic speed
     MAX_EPISODE_STEPS: int = 2000           # Episode truncation threshold
 
     # File Paths
