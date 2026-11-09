@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { getProceduralRoadInfluence, drawRoadOnRadar, getRandomSeed } from './Road.js';
+export { getRandomSeed };
 
 // -------------------------------------------------------------
 // 1. Deterministic Math & Seeded Perlin Noise (Identical in JS & GLSL)
@@ -69,25 +71,39 @@ export function fbm2D(x, y, octaves = 3, lacunarity = 2.0, persistence = 0.35, s
 
 // Full mathematical terrain elevation function (matching shader 100% anywhere in infinite space)
 export function getTerrainElevation(x, z, params = DEFAULT_GROUND_CONFIG) {
-    const elevation = params.elevation ?? 14.0;
-    const frequency = params.frequency ?? 0.012;
-    const octaves = params.octaves ?? 3;
-    const persistence = params.persistence ?? 0.35;
-    const lacunarity = params.lacunarity ?? 2.0;
-    const spawnFlatRadius = params.spawnFlatRadius ?? 25.0;
-    const seed = params.seed ?? 1337.0;
+    const elevation = params.elevation ?? 25.0;
+    const frequency = params.frequency ?? 0.025;
+    const octaves = params.octaves ?? 4;
+    const persistence = params.persistence ?? 0.70;
+    const lacunarity = params.lacunarity ?? 1.0;
+    const seed = params.seed ?? 1170.0;
 
     const noiseVal = fbm2D(x * frequency, z * frequency, octaves, lacunarity, persistence, seed);
     let h = noiseVal * elevation;
 
-    // Smooth level plateau around origin (0, 0) for safe initial car spawning
-    if (spawnFlatRadius > 0.0) {
-        const dist = Math.hypot(x, z);
-        const rInner = Math.max(0.0, spawnFlatRadius - 4.0);
-        const rOuter = spawnFlatRadius + 8.0;
-        const t = Math.min(Math.max((dist - rInner) / (rOuter - rInner), 0.0), 1.0);
-        const blend = t * t * (3.0 - 2.0 * t);
-        h *= blend;
+    // Carve road path into mountains
+    const roadCarve = params.roadCarve ?? true;
+    if (roadCarve) {
+        const roadWidth = params.roadWidth ?? 32.0;
+        const shoulderWidth = params.shoulderWidth ?? 20.0;
+        const roadElevationScale = params.roadElevationScale ?? 1.0;
+
+        const road = getProceduralRoadInfluence(x, z, roadWidth, shoulderWidth, roadElevationScale, seed);
+        if (road.factor > 0.0) {
+            // Smooth Hermite blend between road elevation and mountain elevation
+            h = (1.0 - road.factor) * h + road.factor * road.roadHeight;
+        }
+    } else {
+        // Fallback spawn flat plateau if road carving is disabled
+        const spawnFlatRadius = params.spawnFlatRadius ?? 0.0;
+        if (spawnFlatRadius > 0.0) {
+            const dist = Math.hypot(x, z);
+            const rInner = Math.max(0.0, spawnFlatRadius - 4.0);
+            const rOuter = spawnFlatRadius + 8.0;
+            const t = Math.min(Math.max((dist - rInner) / (rOuter - rInner), 0.0), 1.0);
+            const blend = t * t * (3.0 - 2.0 * t);
+            h *= blend;
+        }
     }
 
     return h;
@@ -109,7 +125,7 @@ export function getTerrainNormal(x, z, params = DEFAULT_GROUND_CONFIG, eps = 0.3
 // -------------------------------------------------------------
 
 export const DEFAULT_GROUND_CONFIG = {
-    seed: 1170,              // World seed for procedural generation
+    seed: getRandomSeed(),   // Random world seed generated on every startup/reload
     chunkSize: 40,           // Dimension of each chunk in meters (40x40m)
     segmentsPerChunk: 24,    // Geometry grid resolution per chunk
     renderDistance: 4,       // Visual chunk radius around car (4 chunks = ~160m radius)
@@ -119,7 +135,11 @@ export const DEFAULT_GROUND_CONFIG = {
     octaves: 4,              // Octave layering (1 to 5)
     persistence: 0.70,       // Roughness
     lacunarity: 1.00,        // Frequency multiplier
-    spawnFlatRadius: 100.0,   // Level ground plateau around (0, 0)
+    spawnFlatRadius: 0.0,    // Level ground plateau (now provided smoothly by the road bed)
+    roadCarve: true,         // Carve road path into mountains
+    roadWidth: 32.0,         // Width of flat road surface (meters)
+    shoulderWidth: 20.0,     // Mountain bank blend width (meters)
+    roadElevationScale: 1.0, // Scale road uphill/downhill heights
     wireframeColor: '#788187', // Electric blue wireframe
     wireframe: true,         // Wireframe mode always active
     fogColor: '#181a1f',     // Distance fog color matching scene background
@@ -134,14 +154,18 @@ export const DEFAULT_GROUND_CONFIG = {
 const vertexShader = /* glsl */ `
 precision highp float;
 
+attribute float aRoadFactor;
+
 varying vec3 vWorldPos;
 varying vec3 vNormalVec;
 varying float vElevation;
 varying float vSlope;
 varying vec2 vUvCoord;
+varying float vRoadFactor;
 
 void main() {
     vUvCoord = uv;
+    vRoadFactor = aRoadFactor;
 
     // Model space vertex: X, Y, Z come directly from the CPU geometry attributes
     // Y is the exact Perlin elevation matching Rapier trimesh collider 100.000%
@@ -168,8 +192,14 @@ uniform float uFogFar;
 
 varying vec3 vWorldPos;
 varying float vElevation;
+varying float vRoadFactor;
 
 void main() {
+    // Hide mountain wireframe under the road wireframe corridor
+    if (vRoadFactor > 0.02) {
+        discard;
+    }
+
     // Subtle elevation brightness accent (higher ridges glow slightly more vivid electric cyan)
     float heightSheen = clamp((vElevation + 2.0) * 0.02, 0.0, 0.4);
     vec3 baseColor = clamp(uWireframeColor + vec3(heightSheen * 0.1, heightSheen * 0.35, heightSheen * 0.5), 0.0, 1.0);
@@ -201,6 +231,11 @@ class TerrainChunk {
         this.geometry = new THREE.PlaneGeometry(size, size, segments, segments);
         this.geometry.rotateX(-Math.PI / 2);
 
+        // aRoadFactor per-vertex attribute: 1.0 when under road wireframe corridor, 0.0 on mountain
+        const vertCount = (segments + 1) * (segments + 1);
+        const roadFactors = new Float32Array(vertCount);
+        this.geometry.setAttribute('aRoadFactor', new THREE.BufferAttribute(roadFactors, 1));
+
         this.mesh = new THREE.Mesh(this.geometry, material);
         this.mesh.frustumCulled = false; // Vertex shader handles displacement
         this.mesh.receiveShadow = true;
@@ -215,11 +250,21 @@ class TerrainChunk {
         this.mesh.position.set(cx * this.size, 0, cz * this.size);
     }
 
-    // Populate CPU vertices for Rapier 3D Trimesh collision
+    // Populate CPU vertices for Rapier 3D Trimesh collision & road wireframe mask
     syncHeights(params) {
         const positions = this.geometry.attributes.position;
+        const roadFactors = this.geometry.attributes.aRoadFactor;
         const originX = this.cx * this.size;
         const originZ = this.cz * this.size;
+
+        const roadCarve = params.roadCarve ?? true;
+        const showRoadMesh = params.showRoadMesh ?? true;
+        const shouldHideUnderRoad = roadCarve && showRoadMesh;
+        const roadWidth = params.roadWidth ?? 32.0;
+        const shoulderWidth = params.shoulderWidth ?? 20.0;
+        const roadElevationScale = params.roadElevationScale ?? 1.0;
+        const seed = params.seed ?? 1170.0;
+        const halfW = roadWidth * 0.5;
 
         for (let i = 0; i < positions.count; i++) {
             const lx = positions.getX(i);
@@ -228,9 +273,24 @@ class TerrainChunk {
             const wz = originZ + lz;
             const h = getTerrainElevation(wx, wz, params);
             positions.setY(i, h);
+
+            let rf = 0.0;
+            if (shouldHideUnderRoad) {
+                const road = getProceduralRoadInfluence(wx, wz, roadWidth, shoulderWidth, roadElevationScale, seed);
+                if (road.distance < halfW) {
+                    // Inside the road corridor: ramp from 0 at edge to 1.0 deeper inside
+                    rf = Math.min(1.0, (halfW - road.distance) / 1.0);
+                }
+            }
+            if (roadFactors) {
+                roadFactors.setX(i, rf);
+            }
         }
 
         positions.needsUpdate = true;
+        if (roadFactors) {
+            roadFactors.needsUpdate = true;
+        }
         this.geometry.computeVertexNormals();
         this.geometry.computeBoundingBox();
         this.geometry.computeBoundingSphere();
@@ -515,12 +575,16 @@ export class Ground {
     updateParams(newParams, carBody = null) {
         let noiseNeedsRebuild = false;
 
-        const noiseKeys = ['seed', 'elevation', 'frequency', 'octaves', 'persistence', 'lacunarity', 'spawnFlatRadius'];
+        const noiseKeys = ['seed', 'elevation', 'frequency', 'octaves', 'persistence', 'lacunarity', 'spawnFlatRadius', 'roadCarve', 'roadWidth', 'shoulderWidth', 'roadElevationScale'];
         for (const key of noiseKeys) {
             if (newParams[key] !== undefined && Math.abs(newParams[key] - this.params[key]) > 0.0001) {
                 noiseNeedsRebuild = true;
                 break;
             }
+        }
+
+        if (newParams.showRoadMesh !== undefined && newParams.showRoadMesh !== this.params.showRoadMesh) {
+            noiseNeedsRebuild = true;
         }
 
         // Apply new values to config
@@ -639,15 +703,13 @@ export function drawPerlinNoiseRadar(canvas, carX, carZ, carHeading, params = DE
             const h = getTerrainElevation(wx, wz, params);
             const normH = Math.max(0, Math.min(1, (h + 2.0) / (elevAmp * 1.2 + 2.0)));
 
-            // Color coding: sleek cyber blue contour matching the blue wireframe world
-            const r = Math.floor(normH * 20);
-            const g = Math.floor(60 + normH * 130);
-            const b = Math.floor(130 + normH * 125);
+            // Color coding: pure black and white monochrome grayscale topographical radar
+            const gray = Math.floor(12 + normH * 75);
 
-            data[ptr++] = r;
-            data[ptr++] = g;
-            data[ptr++] = b;
-            data[ptr++] = 230; // Alpha
+            data[ptr++] = gray;
+            data[ptr++] = gray;
+            data[ptr++] = gray;
+            data[ptr++] = 255; // Alpha
         }
     }
 
@@ -671,7 +733,7 @@ export function drawPerlinNoiseRadar(canvas, carX, carZ, carHeading, params = DE
 
     // 2. Draw Chunk Grid Lines
     const chunkSize = params.chunkSize || 40;
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';
     ctx.lineWidth = 1;
 
     const minChunkX = Math.floor(startX / chunkSize) * chunkSize;
@@ -698,7 +760,7 @@ export function drawPerlinNoiseRadar(canvas, carX, carZ, carHeading, params = DE
     [50, 100, 150].forEach(rDist => {
         const radPix = rDist * scale;
         if (radPix < halfW - 4) {
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
             ctx.beginPath();
             ctx.arc(halfW, halfH, radPix, 0, Math.PI * 2);
             ctx.stroke();
@@ -706,24 +768,29 @@ export function drawPerlinNoiseRadar(canvas, carX, carZ, carHeading, params = DE
     });
 
     // Crosshairs
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
     ctx.beginPath();
-    ctx.moveTo(halfW, halfH - 12);
-    ctx.lineTo(halfW, halfH + 12);
-    ctx.moveTo(halfW - 12, halfH);
-    ctx.lineTo(halfW + 12, halfH);
+    ctx.moveTo(halfW, halfH - 8);
+    ctx.lineTo(halfW, halfH + 8);
+    ctx.moveTo(halfW - 8, halfH);
+    ctx.lineTo(halfW + 8, halfH);
     ctx.stroke();
+
+    // 3b. Draw Curved Mountain Road Path onto Topographical Radar
+    if (params.roadCarve !== false) {
+        drawRoadOnRadar(ctx, carX, carZ, carHeading, params.seed ?? 1170.0, range, width, height);
+    }
 
     ctx.restore();
 
-    // 4. Draw Radar Bezel Ring
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.6)'; // Cyan bezel
-    ctx.lineWidth = 2.5;
+    // 4. Draw Radar Bezel Ring (Pure White Monochrome)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.arc(halfW, halfH, halfW - 2, 0, Math.PI * 2);
     ctx.stroke();
 
-    // 5. Draw Car Arrow Indicator in Center
+    // 5. Draw Car Arrow Indicator in Center (Minimal smaller size pure white tracking)
     ctx.save();
     ctx.translate(halfW, halfH);
     // Heading in Three.js: car forward is along +X, lateral is +Z
@@ -731,15 +798,15 @@ export function drawPerlinNoiseRadar(canvas, carX, carZ, carHeading, params = DE
     ctx.rotate(carHeading);
 
     // Glowing dot & arrow
-    ctx.shadowColor = '#38bdf8';
-    ctx.shadowBlur = 8;
-    ctx.fillStyle = '#38bdf8';
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 4;
+    ctx.fillStyle = '#ffffff';
 
     ctx.beginPath();
-    ctx.moveTo(0, -9);     // Arrow head pointing forward
-    ctx.lineTo(5, 6);
-    ctx.lineTo(0, 3);
-    ctx.lineTo(-5, 6);
+    ctx.moveTo(0, -6.5);     // Compact arrow head pointing forward
+    ctx.lineTo(3.8, 4.5);
+    ctx.lineTo(0, 2.2);
+    ctx.lineTo(-3.8, 4.5);
     ctx.closePath();
     ctx.fill();
 
