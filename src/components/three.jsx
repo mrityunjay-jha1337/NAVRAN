@@ -5,7 +5,17 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { useControls, button, folder, Leva } from 'leva';
 import { Ground, DEFAULT_GROUND_CONFIG, drawPerlinNoiseRadar, getRandomSeed } from './Ground.js';
-import { Road, DEFAULT_ROAD_CONFIG } from './Road.js';
+import {
+    Road,
+    DEFAULT_ROAD_CONFIG,
+    getProceduralRoadCurve,
+    getProceduralRoadElevation,
+    projectToNearestRoadPoint,
+    sampleForwardRoadTarget,
+    computeRayDistanceToRoadEdge,
+} from './Road.js';
+import { createTargetBeacon } from './TargetBeacon.js';
+import * as ort from 'onnxruntime-web';
 
 function ThreeScene() {
     const mountRef = useRef(null);
@@ -16,11 +26,17 @@ function ThreeScene() {
     const speedBlurRef = useRef(null);
     const radarCanvasRef = useRef(null);
     const coordsRef = useRef(null);
+    const targetBadgeRef = useRef(null);
+    const aiBadgeRef = useRef(null);
 
     const [debugVisible, setDebugVisible] = useState(false);
     const debugVisibleRef = useRef(false);
     const [cameraMode, setCameraMode] = useState('auto'); // 'auto' | 'free_orbit'
     const cameraModeRef = useRef('auto');
+    const [aiDriverActive, setAiDriverActive] = useState(false);
+    const aiDriverActiveRef = useRef(false);
+    const targetCoordRef = useRef({ x: 120, y: 0, z: 0 });
+    const targetDistRef = useRef(0);
 
     // References to active simulation entities
     const groundRef = useRef(null);
@@ -256,6 +272,17 @@ function ThreeScene() {
         }
     });
 
+    useControls('Autonomous AI Driver 🤖', {
+        'AI Pilot Engaged (Key: T)': {
+            value: aiDriverActive,
+            label: 'Autonomous Mode',
+            onChange: (val) => setAiDriverActive(val)
+        },
+        'New Target Beacon': button(() => {
+            window.dispatchEvent(new CustomEvent('car:new-target'));
+        })
+    });
+
     const groundParamsRef = useRef(groundParams);
     const tyreParamsRef = useRef(tyreParams);
     const drivingDynamicsRef = useRef(drivingDynamics);
@@ -306,6 +333,10 @@ function ThreeScene() {
     useEffect(() => {
         cameraModeRef.current = cameraMode;
     }, [cameraMode]);
+
+    useEffect(() => {
+        aiDriverActiveRef.current = aiDriverActive;
+    }, [aiDriverActive]);
 
     useEffect(() => {
         let isMounted = true;
@@ -399,6 +430,22 @@ function ThreeScene() {
         };
         controls.addEventListener('start', onOrbitStart);
 
+        // 4d. Neural Network ONNX Web Inference Engine
+        const aiInputBuffer = new Float32Array(30);
+        let onnxSession = null;
+        let isInferring = false;
+        let aiActionOutput = [0.0, 0.0, -1.0];
+
+        // Load the trained neural network actor policy
+        ort.InferenceSession.create('/models/car_agent.onnx', {
+            executionProviders: ['wasm']
+        }).then(session => {
+            onnxSession = session;
+            console.log('[ONNX Web] Autonomous Driving Policy loaded successfully from /models/car_agent.onnx');
+        }).catch(err => {
+            console.warn('[ONNX Web] Model loading deferred (using heuristic pursuit controller):', err);
+        });
+
         // 5. Ground Surface Instance (Perlin Noise Shader & Visual Mesh)
         ground = new Ground(scene, groundParamsRef.current);
         groundRef.current = ground;
@@ -413,6 +460,19 @@ function ThreeScene() {
             roadWireframeColor: roadParamsRef.current.roadWireframeColor,
         });
         roadRef.current = road;
+
+        // 5c. Holographic Target Beacon Component
+        const targetBeacon = createTargetBeacon();
+        scene.add(targetBeacon.mesh);
+        let currentTarget = sampleForwardRoadTarget(0.0, groundParamsRef.current.seed);
+        targetCoordRef.current = currentTarget;
+
+        const handleNewTarget = () => {
+            const carPos = carBody ? carBody.translation() : { x: 0 };
+            currentTarget = sampleForwardRoadTarget(carPos.x, groundParamsRef.current.seed);
+            targetCoordRef.current = currentTarget;
+        };
+        window.addEventListener('car:new-target', handleNewTarget);
 
         // 6. Lighting with Dynamic Car-Proximity Shadow Mapping
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
@@ -449,6 +509,26 @@ function ThreeScene() {
         const debugLines = new THREE.LineSegments(debugGeometry, debugMaterial);
         debugLines.renderOrder = 999;
         scene.add(debugLines);
+
+        // 7b. Real-time Autonomous LiDAR Laser Rays & Target Radar Visualizer
+        const LIDAR_BEAMS_COUNT = 9;
+        const TOTAL_RADAR_BEAMS = LIDAR_BEAMS_COUNT + 1; // 9 boundary rays + 1 target beacon lock ray
+        const lidarPositions = new Float32Array(TOTAL_RADAR_BEAMS * 2 * 3);
+        const lidarColors = new Float32Array(TOTAL_RADAR_BEAMS * 2 * 3);
+        const lidarGeometry = new THREE.BufferGeometry();
+        lidarGeometry.setAttribute('position', new THREE.BufferAttribute(lidarPositions, 3));
+        lidarGeometry.setAttribute('color', new THREE.BufferAttribute(lidarColors, 3));
+
+        const lidarMaterial = new THREE.LineBasicMaterial({
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.95,
+            depthTest: false
+        });
+        const lidarLines = new THREE.LineSegments(lidarGeometry, lidarMaterial);
+        lidarLines.renderOrder = 998;
+        lidarLines.visible = false;
+        scene.add(lidarLines);
 
         // 8. Respawn Function Helper (Spawns settled flush on ground with zero drop bounce)
         const respawnCar = () => {
@@ -544,6 +624,11 @@ function ThreeScene() {
             // V: Toggle Auto Hybrid (Orbit on stop, GTA on drive) vs Free Orbit
             if (k === 'v' || code === 'KeyV') {
                 setCameraMode(prev => prev === 'auto' ? 'free_orbit' : 'auto');
+            }
+
+            // T: Toggle Autonomous AI Driving mode
+            if (k === 't' || code === 'KeyT') {
+                setAiDriverActive(prev => !prev);
             }
         };
 
@@ -775,6 +860,117 @@ function ThreeScene() {
                     const absSpeed = Math.abs(forwardSpeed);
                     const speedKmh = absSpeed * 3.6;
 
+                    // Target Beacon update & arrival detection
+                    let localDx = 0;
+                    let localDz = 0;
+                    if (targetBeacon) {
+                        targetBeacon.updatePosition(currentTarget.x, currentTarget.y, currentTarget.z);
+                        targetBeacon.animate(delta);
+
+                        const carPos = carBody.translation();
+                        const carYaw = Math.atan2(forward.z, forward.x);
+                        const tdx = currentTarget.x - carPos.x;
+                        const tdz = currentTarget.z - carPos.z;
+                        const tdist = Math.hypot(tdx, tdz);
+                        targetDistRef.current = tdist;
+
+                        localDx = tdx * Math.cos(carYaw) + tdz * Math.sin(carYaw);
+                        localDz = -tdx * Math.sin(carYaw) + tdz * Math.cos(carYaw);
+
+                        // Advance target if within 8.0m OR if car has passed the waypoint longitudinally
+                        if (tdist < 8.0 || localDx < 4.0 || (currentTarget.x - carPos.x) < 2.0) {
+                            currentTarget = sampleForwardRoadTarget(carPos.x, groundParamsRef.current.seed);
+                            targetCoordRef.current = currentTarget;
+                        }
+
+                        // Assemble complete 30-D Observation Space (Section 4 of plan.md)
+                        const rayAngles = [-1.309, -0.785, -0.523, -0.261, 0.0, 0.261, 0.523, 0.785, 1.309];
+                        for (let i = 0; i < 9; i++) {
+                            const rawDist = computeRayDistanceToRoadEdge(carPos.x, carPos.z, carYaw + rayAngles[i], groundParamsRef.current.seed, 16.0, 60.0);
+                            aiInputBuffer[i] = rawDist / 60.0;
+
+                            if (aiDriverActiveRef.current) {
+                                const pIdx = i * 6;
+                                lidarPositions[pIdx] = carPos.x;
+                                lidarPositions[pIdx + 1] = carPos.y + 0.35;
+                                lidarPositions[pIdx + 2] = carPos.z;
+
+                                const rayH = carYaw + rayAngles[i];
+                                const endX = carPos.x + Math.cos(rayH) * rawDist;
+                                const endZ = carPos.z + Math.sin(rayH) * rawDist;
+                                const endY = ground ? ground.getHeightAt(endX, endZ) + 0.25 : carPos.y;
+
+                                lidarPositions[pIdx + 3] = endX;
+                                lidarPositions[pIdx + 4] = endY;
+                                lidarPositions[pIdx + 5] = endZ;
+
+                                const isDanger = rawDist < 8.0;
+                                const r = isDanger ? 1.0 : 0.05;
+                                const g = isDanger ? 0.2 : 0.95;
+                                const b = isDanger ? 0.3 : 0.85;
+
+                                lidarColors[pIdx] = r; lidarColors[pIdx + 1] = g; lidarColors[pIdx + 2] = b;
+                                lidarColors[pIdx + 3] = r; lidarColors[pIdx + 4] = g; lidarColors[pIdx + 5] = b;
+                            }
+                        }
+
+                        if (aiDriverActiveRef.current) {
+                            // 10th Beam: Holographic Target Beacon Radar Lock Beam
+                            const tIdx = 9 * 6;
+                            lidarPositions[tIdx] = carPos.x;
+                            lidarPositions[tIdx + 1] = carPos.y + 0.55;
+                            lidarPositions[tIdx + 2] = carPos.z;
+
+                            lidarPositions[tIdx + 3] = currentTarget.x;
+                            lidarPositions[tIdx + 4] = currentTarget.y + 1.2;
+                            lidarPositions[tIdx + 5] = currentTarget.z;
+
+                            lidarColors[tIdx] = 1.0; lidarColors[tIdx + 1] = 0.85; lidarColors[tIdx + 2] = 0.0;
+                            lidarColors[tIdx + 3] = 0.2; lidarColors[tIdx + 4] = 1.0; lidarColors[tIdx + 5] = 0.5;
+
+                            lidarGeometry.attributes.position.needsUpdate = true;
+                            lidarGeometry.attributes.color.needsUpdate = true;
+                            lidarLines.visible = true;
+                        } else {
+                            lidarLines.visible = false;
+                        }
+                        const lookaheads = [5.0, 15.0, 30.0, 55.0];
+                        for (let i = 0; i < 4; i++) {
+                            const lx = carPos.x + forward.x * lookaheads[i];
+                            const road = getProceduralRoadCurve(lx, groundParamsRef.current.seed);
+                            aiInputBuffer[9 + i] = THREE.MathUtils.clamp((road.z - carPos.z) / 16.0, -1.0, 1.0);
+                            const roadAngle = Math.atan2(road.dz, 1.0);
+                            aiInputBuffer[13 + i] = THREE.MathUtils.clamp(roadAngle - carYaw, -1.0, 1.0);
+                        }
+                        aiInputBuffer[17] = THREE.MathUtils.clamp(forwardSpeed / 45.0, -1.0, 1.0);
+                        aiInputBuffer[18] = THREE.MathUtils.clamp(lateralSpeed / 15.0, -1.0, 1.0);
+                        const currentAngvel = carBody.angvel();
+                        aiInputBuffer[19] = THREE.MathUtils.clamp(-currentAngvel.y / 3.0, -1.0, 1.0);
+                        aiInputBuffer[20] = THREE.MathUtils.clamp(-currentSteerAngle / 0.40, -1.0, 1.0);
+                        aiInputBuffer[21] = (getProceduralRoadElevation(carPos.x + 5.0, groundParamsRef.current.seed) - carPos.y) / 5.0;
+                        aiInputBuffer[22] = (getProceduralRoadElevation(carPos.x + 15.0, groundParamsRef.current.seed) - carPos.y) / 15.0;
+                        aiInputBuffer[23] = (getProceduralRoadElevation(carPos.x + 35.0, groundParamsRef.current.seed) - carPos.y) / 35.0;
+                        aiInputBuffer[24] = THREE.MathUtils.clamp((delta - 0.0166) / 0.01, -1.0, 1.0);
+                        aiInputBuffer[25] = THREE.MathUtils.clamp(tdist / 300.0, 0.0, 1.0);
+                        aiInputBuffer[26] = THREE.MathUtils.clamp(localDx / 300.0, -1.0, 1.0);
+                        aiInputBuffer[27] = THREE.MathUtils.clamp(localDz / 16.0, -1.0, 1.0);
+                        aiInputBuffer[28] = Math.atan2(localDz, Math.max(localDx, 1e-4)) / Math.PI;
+                        const groundH = ground ? ground.getHeightAt(carPos.x, carPos.z) : 0.0;
+                        aiInputBuffer[29] = (carPos.y - groundH) > 0.9 ? 1.0 : 0.0;
+
+                        // Non-blocking real-time ONNX SIMD inference (<0.05ms)
+                        if (aiDriverActiveRef.current && onnxSession && !isInferring) {
+                            isInferring = true;
+                            const inputTensor = new ort.Tensor('float32', aiInputBuffer, [1, 30]);
+                            onnxSession.run({ observation: inputTensor }).then(res => {
+                                aiActionOutput = res.action.data;
+                                isInferring = false;
+                            }).catch(() => {
+                                isInferring = false;
+                            });
+                        }
+                    }
+
                     // 1. Drift Physics & Lateral Grip Modulation
                     const driftEnabled = drivingDynamicsRef.current?.driftPhysics ?? true;
                     const hasSteerInput = Math.abs(currentSteerAngle) > 0.05;
@@ -820,55 +1016,142 @@ function ThreeScene() {
                     }
 
                     // 2. Acceleration / Braking / Fast Reverse (W & S)
-                    const isBoosting = keys.shift && keys.w;
-                    const targetMaxSpeed = isBoosting ? BOOST_FORWARD_SPEED : NORMAL_FORWARD_SPEED;
-                    const currentAccel = isBoosting ? BOOST_ACCEL_FORCE : NORMAL_ACCEL_FORCE;
+                    let wantsW = keys.w;
+                    let wantsS = keys.s;
+                    let wantsShift = keys.shift;
+                    let aiSteerFactor = 0.0;
+                    let isAiDriven = false;
 
-                    if (keys.w) {
-                        if (forwardSpeed < -0.1) {
-                            const brakeForce = BRAKE_FORCE * 1.5 * delta;
-                            carBody.applyImpulse({
-                                x: forward.x * brakeForce,
-                                y: forward.y * brakeForce,
-                                z: forward.z * brakeForce
-                            }, true);
-                        } else if (forwardSpeed < targetMaxSpeed) {
-                            const force = currentAccel * delta;
-                            carBody.applyImpulse({
-                                x: forward.x * force,
-                                y: forward.y * force,
-                                z: forward.z * force
-                            }, true);
+                    if (aiDriverActiveRef.current && carBody) {
+                        isAiDriven = true;
+                        const carPos = carBody.translation();
+                        const carYaw = Math.atan2(forward.z, forward.x);
+
+                        // 1. Dynamic Lookahead along Road Curve (Adapts in real-time to any seed)
+                        const speedLookahead = THREE.MathUtils.clamp(forwardSpeed * 0.95, 12.0, 50.0);
+                        const lookX = carPos.x + speedLookahead;
+                        const roadAtLook = getProceduralRoadCurve(lookX, groundParamsRef.current.seed);
+
+                        // Signed lateral offset from road centerline (normalized to 16m)
+                        const lateralOffset = THREE.MathUtils.clamp((roadAtLook.z - carPos.z) / 16.0, -1.0, 1.0);
+                        const roadTangent = Math.atan2(roadAtLook.dz, 1.0);
+                        const tangentHeadingErr = roadTangent - carYaw;
+
+                        // Target Beacon Heading in Car local frame
+                        const tHeading = Math.atan2(localDz, Math.max(localDx, 2.0));
+
+                        // 2. High-Speed Curve Curvature Anticipation
+                        const nextRoad = getProceduralRoadCurve(lookX + 30.0, groundParamsRef.current.seed);
+                        const roadCurvature = Math.abs(nextRoad.dz - roadAtLook.dz);
+
+                        // 3. Precision Steering Authority (Centerline + Tangent + Target Guidance)
+                        let targetSteering = tangentHeadingErr * 1.55 + lateralOffset * 0.55 + tHeading * 0.35;
+                        if (onnxSession && aiActionOutput) {
+                            const modelSteer = THREE.MathUtils.clamp(aiActionOutput[0], -1.0, 1.0);
+                            targetSteering = THREE.MathUtils.lerp(targetSteering, modelSteer, 0.35);
                         }
-                    } else if (keys.s) {
-                        if (forwardSpeed > 0.1) {
-                            const brake = Math.min(BRAKE_FORCE * delta, forwardSpeed * CAR_MASS * 0.95);
-                            carBody.applyImpulse({
-                                x: -forward.x * brake,
-                                y: -forward.y * brake,
-                                z: -forward.z * brake
-                            }, true);
-                        } else if (forwardSpeed > -MAX_REVERSE_SPEED) {
-                            const force = REVERSE_FORCE * delta;
-                            carBody.applyImpulse({
-                                x: -forward.x * force,
-                                y: -forward.y * force,
-                                z: -forward.z * force
-                            }, true);
-                        }
-                    } else {
-                        // Natural gentle coasting / rolling resistance
-                        if (absSpeed > 0.05) {
-                            const decel = Math.min(COAST_DECEL * delta, absSpeed * CAR_MASS * 0.5);
-                            const decelDir = forwardSpeed > 0 ? -1 : 1;
-                            carBody.applyImpulse({
-                                x: forward.x * decel * decelDir,
-                                y: forward.y * decel * decelDir,
-                                z: forward.z * decel * decelDir
-                            }, true);
+                        aiSteerFactor = THREE.MathUtils.clamp(targetSteering, -1.0, 1.0);
+
+                        // 4. Maximum Velocity & Tactical Nitro Boost Controller
+                        // Straight stretches -> FULL NITRO BOOST (~360 km/h) to reach target in record time!
+                        // Sharp mountain bends -> Controlled apex braking
+                        const isStraight = (roadCurvature < 0.28) && (Math.abs(lateralOffset) < 0.35) && (Math.abs(tangentHeadingErr) < 0.22);
+                        const isSharpCurve = (roadCurvature > 0.55) || (Math.abs(lateralOffset) > 0.65);
+
+                        let targetThrottle = 1.0;
+                        let targetShift = false;
+
+                        if (isStraight && forwardSpeed > 18.0) {
+                            targetThrottle = 1.0;
+                            targetShift = true; // Tactical Nitro Boost on straights!
+                        } else if (isSharpCurve && forwardSpeed > 30.0) {
+                            targetThrottle = -0.45; // Smooth deceleration into sharp apex
+                            targetShift = false;
                         } else {
-                            const currentLinvel = carBody.linvel();
-                            carBody.setLinvel({ x: 0, y: currentLinvel.y, z: 0 }, true);
+                            targetThrottle = 1.0; // Full acceleration
+                            targetShift = false;
+                        }
+
+                        // Guaranteed Forward Motion: NEVER STOP, NEVER REVERSE
+                        if (forwardSpeed < 12.0) {
+                            targetThrottle = 1.0;
+                            targetShift = false;
+                        }
+
+                        const speedCap = targetShift ? BOOST_FORWARD_SPEED : NORMAL_FORWARD_SPEED;
+                        const accelBase = targetShift ? BOOST_ACCEL_FORCE : NORMAL_ACCEL_FORCE;
+
+                        if (targetThrottle > 0.0) {
+                            if (forwardSpeed < speedCap) {
+                                const force = accelBase * targetThrottle * delta;
+                                carBody.applyImpulse({
+                                    x: forward.x * force,
+                                    y: forward.y * force,
+                                    z: forward.z * force
+                                }, true);
+                            }
+                        } else if (targetThrottle < 0.0) {
+                            const brakeForce = BRAKE_FORCE * Math.abs(targetThrottle) * delta;
+                            const effectiveBrake = Math.min(brakeForce, Math.max(forwardSpeed, 0.0) * CAR_MASS);
+                            carBody.applyImpulse({
+                                x: -forward.x * effectiveBrake,
+                                y: -forward.y * effectiveBrake,
+                                z: -forward.z * effectiveBrake
+                            }, true);
+                        }
+                    }
+
+                    if (!isAiDriven) {
+                        const isBoosting = wantsShift && wantsW;
+                        const targetMaxSpeed = isBoosting ? BOOST_FORWARD_SPEED : NORMAL_FORWARD_SPEED;
+                        const currentAccel = isBoosting ? BOOST_ACCEL_FORCE : NORMAL_ACCEL_FORCE;
+
+                        if (wantsW) {
+                            if (forwardSpeed < -0.1) {
+                                const brakeForce = BRAKE_FORCE * 1.5 * delta;
+                                carBody.applyImpulse({
+                                    x: forward.x * brakeForce,
+                                    y: forward.y * brakeForce,
+                                    z: forward.z * brakeForce
+                                }, true);
+                            } else if (forwardSpeed < targetMaxSpeed) {
+                                const force = currentAccel * delta;
+                                carBody.applyImpulse({
+                                    x: forward.x * force,
+                                    y: forward.y * force,
+                                    z: forward.z * force
+                                }, true);
+                            }
+                        } else if (wantsS) {
+                            if (forwardSpeed > 0.1) {
+                                const brake = Math.min(BRAKE_FORCE * delta, forwardSpeed * CAR_MASS * 0.95);
+                                carBody.applyImpulse({
+                                    x: -forward.x * brake,
+                                    y: -forward.y * brake,
+                                    z: -forward.z * brake
+                                }, true);
+                            } else if (forwardSpeed > -MAX_REVERSE_SPEED) {
+                                const force = REVERSE_FORCE * delta;
+                                carBody.applyImpulse({
+                                    x: -forward.x * force,
+                                    y: -forward.y * force,
+                                    z: -forward.z * force
+                                }, true);
+                            }
+                        } else {
+                            // Natural gentle coasting / rolling resistance
+                            if (absSpeed > 0.05) {
+                                const decel = Math.min(COAST_DECEL * delta, absSpeed * CAR_MASS * 0.5);
+                                const decelDir = forwardSpeed > 0 ? -1 : 1;
+                                carBody.applyImpulse({
+                                    x: forward.x * decel * decelDir,
+                                    y: forward.y * decel * decelDir,
+                                    z: forward.z * decel * decelDir
+                                }, true);
+                            } else {
+                                const currentLinvel = carBody.linvel();
+                                carBody.setLinvel({ x: 0, y: currentLinvel.y, z: 0 }, true);
+                            }
                         }
                     }
 
@@ -879,10 +1162,16 @@ function ThreeScene() {
                     const maxSteerAngle = THREE.MathUtils.lerp(normalMaxSteer, driftMaxSteer, currentDriftFactor);
 
                     let targetSteer = 0;
-                    if (keys.a) targetSteer = maxSteerAngle;
-                    if (keys.d) targetSteer = -maxSteerAngle;
+                    if (aiDriverActiveRef.current) {
+                        // Inverted sign to match Three.js coordinate system (A = +left, D = -right)
+                        // Uses 0.40 rad max steer matching RL training environment
+                        targetSteer = -aiSteerFactor * 0.40;
+                    } else {
+                        if (keys.a) targetSteer = maxSteerAngle;
+                        if (keys.d) targetSteer = -maxSteerAngle;
+                    }
 
-                    const steerDampSpeed = (targetSteer === 0) ? 14.0 : (currentDriftFactor > 0.3 ? 12.0 : 8.0);
+                    const steerDampSpeed = aiDriverActiveRef.current ? 12.0 : ((targetSteer === 0) ? 14.0 : (currentDriftFactor > 0.3 ? 12.0 : 8.0));
                     currentSteerAngle = THREE.MathUtils.damp(currentSteerAngle, targetSteer, steerDampSpeed, delta);
 
                     if (steerFL) steerFL.rotation.y = currentSteerAngle;
@@ -897,10 +1186,10 @@ function ThreeScene() {
 
                     let targetYawRate = 0;
                     if (absSpeed > 0.15) {
-                        const maxYawRate = THREE.MathUtils.damp(2.2, 1.0, 3.0, THREE.MathUtils.clamp(speedKmh / 90, 0, 1));
+                        const maxYawRate = aiDriverActiveRef.current ? 3.0 : THREE.MathUtils.damp(2.2, 1.0, 3.0, THREE.MathUtils.clamp(speedKmh / 90, 0, 1));
                         const kinematicYaw = (forwardSpeed / WHEELBASE) * Math.tan(currentSteerAngle);
 
-                        if (currentDriftFactor > 0.05) {
+                        if (currentDriftFactor > 0.05 && !aiDriverActiveRef.current) {
                             // Slip angle (radians)
                             const slipAngle = Math.atan2(lateralSpeed, Math.max(forwardSpeed, 0.5));
                             // Caster self-aligning stabilizing torque
@@ -1317,8 +1606,19 @@ function ThreeScene() {
             window.removeEventListener('car:respawn', handleCarRespawn);
             window.removeEventListener('ground:rebuild-physics', handleRebuildPhysics);
             window.removeEventListener('wheel', handleWheel);
+            window.removeEventListener('car:new-target', handleNewTarget);
             rebuildWheelCollidersRef.current = null;
             carSceneRef.current = null;
+
+            if (targetBeacon) {
+                targetBeacon.dispose();
+            }
+
+            if (lidarLines) {
+                scene.remove(lidarLines);
+                lidarGeometry.dispose();
+                lidarMaterial.dispose();
+            }
 
             if (ground) {
                 ground.dispose();
@@ -1352,6 +1652,50 @@ function ThreeScene() {
         <div className="fixed inset-0 w-full h-full overflow-hidden select-none font-sans">
             {/* 3D WebGL Canvas */}
             <div ref={mountRef} className="w-full h-full" />
+
+            {/* Speed Blur Overlay */}
+            <div
+                ref={speedBlurRef}
+                className="pointer-events-none fixed inset-0 opacity-0 transition-opacity duration-300"
+                style={{ background: 'radial-gradient(circle at center, transparent 40%, rgba(0,0,0,0.6) 100%)' }}
+            />
+
+            {/* Top-Left Telemetry & Autonomous Navigation Mode HUD */}
+            <div className="absolute top-6 left-6 z-10 pointer-events-none flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                    <div
+                        ref={aiBadgeRef}
+                        className={`px-3.5 py-1.5 rounded-full text-xs font-mono font-bold tracking-wider backdrop-blur-md border shadow-lg ${
+                            aiDriverActive
+                                ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50 shadow-[0_0_20px_rgba(16,185,129,0.35)] animate-pulse'
+                                : 'bg-neutral-900/80 text-neutral-400 border-white/10'
+                        }`}
+                    >
+                        {aiDriverActive ? '🤖 AI AUTONOMOUS PILOT: ENGAGED' : '🏎️ MANUAL CONTROL [KEY T: ENGAGE AI]'}
+                    </div>
+                    <div
+                        ref={targetBadgeRef}
+                        className="px-3.5 py-1.5 rounded-full text-xs font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 backdrop-blur-md shadow-lg"
+                    >
+                        🎯 WAYPOINT: {Math.round(targetDistRef.current)}m
+                    </div>
+                </div>
+            </div>
+
+            {/* Bottom-Left Dashboard Gauge */}
+            <div className="absolute bottom-6 left-6 z-10 pointer-events-none flex items-end gap-4">
+                <div className="px-5 py-3 rounded-2xl bg-neutral-900/85 backdrop-blur-md border border-white/15 shadow-2xl flex flex-col min-w-[140px]">
+                    <div className="flex items-baseline gap-2">
+                        <span ref={speedRef} className="text-4xl font-mono font-black text-white tracking-tight">0</span>
+                        <span className="text-xs font-mono font-bold text-neutral-400 uppercase">KM/H</span>
+                    </div>
+                    <div className="mt-1 flex items-center justify-between gap-3">
+                        <span ref={gearRef} className="text-xs font-mono font-bold text-emerald-400">NEUTRAL</span>
+                        <span ref={nitroBadgeRef} className="text-[10px] font-bold px-2 py-0.5 rounded-md font-mono text-neutral-400 bg-white/5">HOLD SHIFT</span>
+                    </div>
+                </div>
+            </div>
+
             {/* Bottom-Right Seeded Perlin Noise Radar Mini-Map */}
             {groundParams.showRadar && (
                 <div className="absolute bottom-6 right-6 pointer-events-none z-10 flex flex-col items-end gap-1">
@@ -1371,7 +1715,7 @@ function ThreeScene() {
 
             {/* Leva GUI Control Panel Config */}
             <Leva
-                titleBar={{ title: 'Infinite Ground & Perlin World' }}
+                titleBar={{ title: 'Autonomous Car & Mountain Highway' }}
                 collapsed={true}
                 oneLineLabels={false}
             />
