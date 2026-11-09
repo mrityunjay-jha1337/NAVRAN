@@ -462,3 +462,78 @@ export function drawRoadOnRadar(ctx, carX, carZ, carHeading, seed = 1170.0, rang
 
     ctx.restore();
 }
+
+// -------------------------------------------------------------
+// 5. Goal Target Projection & LiDAR Raycasts for Autonomous Driver
+// -------------------------------------------------------------
+
+/**
+ * Projects an arbitrary 2D target (rawX, rawZ) to the nearest valid point
+ * on the 3D road surface using Newton-Raphson curve projection and lateral border clamping.
+ */
+export function projectToNearestRoadPoint(rawX, rawZ, seed = 1170.0, roadHalfWidth = 16.0) {
+    let t = rawX;
+    for (let iter = 0; iter < 3; iter++) {
+        const rc = getProceduralRoadCurve(t, seed);
+        const F = (t - rawX) + (rc.z - rawZ) * rc.dz;
+        const FPrime = 1.0 + rc.dz * rc.dz;
+        const delta = F / FPrime;
+        t -= delta;
+        if (Math.abs(delta) < 0.005) break;
+    }
+
+    const road = getProceduralRoadCurve(t, seed);
+    const length = Math.hypot(1.0, road.dz);
+    const normX = -road.dz / length;
+    const normZ = 1.0 / length;
+
+    const dispX = rawX - t;
+    const dispZ = rawZ - road.z;
+    const lateralOffset = dispX * normX + dispZ * normZ;
+
+    let targetX = rawX;
+    let targetZ = rawZ;
+
+    if (Math.abs(lateralOffset) > roadHalfWidth) {
+        const clampedOffset = Math.sign(lateralOffset) * roadHalfWidth;
+        targetX = t + clampedOffset * normX;
+        targetZ = road.z + clampedOffset * normZ;
+    }
+
+    const targetY = getProceduralRoadElevation(targetX, seed);
+    return { x: targetX, y: targetY, z: targetZ };
+}
+
+/**
+ * Samples a random target ahead along the road corridor with lateral offset.
+ */
+export function sampleForwardRoadTarget(carX, seed = 1170.0, roadHalfWidth = 16.0, minDist = 80.0, maxDist = 220.0) {
+    const dist = minDist + Math.random() * (maxDist - minDist);
+    const targetX = carX + dist;
+    const road = getProceduralRoadCurve(targetX, seed);
+    const lateralJitter = (Math.random() * 2.0 - 1.0) * 35.0; // Deliberate jitter to exercise projection
+    const rawZ = road.z + lateralJitter;
+    return projectToNearestRoadPoint(targetX, rawZ, seed, roadHalfWidth);
+}
+
+/**
+ * Fast raycast from (posX, posZ) along heading to find distance to tarmac boundary (|z - roadZ| > 16m).
+ */
+export function computeRayDistanceToRoadEdge(posX, posZ, rayHeading, seed, roadHalfWidth = 16.0, maxDist = 60.0) {
+    const cosH = Math.cos(rayHeading);
+    const sinH = Math.sin(rayHeading);
+    const steps = 30;
+    const stepSize = maxDist / steps;
+
+    for (let i = 1; i <= steps; i++) {
+        const d = i * stepSize;
+        const sx = posX + cosH * d;
+        const sz = posZ + sinH * d;
+        const road = getProceduralRoadCurve(sx, seed);
+        if (Math.abs(sz - road.z) > roadHalfWidth) {
+            return d;
+        }
+    }
+    return maxDist;
+}
+
