@@ -1785,41 +1785,6 @@ function ThreeScene() {
                 style={{ background: 'radial-gradient(circle at center, transparent 40%, rgba(0,0,0,0.6) 100%)' }}
             />
 
-            {/* Top-Left Telemetry & Autonomous Navigation Mode HUD */}
-            <div className="absolute top-6 left-6 z-10 pointer-events-none flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                    <div
-                        ref={aiBadgeRef}
-                        className={`px-3.5 py-1.5 rounded-full text-xs font-mono font-bold tracking-wider backdrop-blur-md border shadow-lg ${
-                            aiDriverActive
-                                ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50 shadow-[0_0_20px_rgba(16,185,129,0.35)] animate-pulse'
-                                : 'bg-neutral-900/80 text-neutral-400 border-white/10'
-                        }`}
-                    >
-                        {aiDriverActive ? '🤖 AI AUTONOMOUS PILOT: ENGAGED (360 KM/H)' : '🏎️ MANUAL CONTROL [T: AI | E: NITRO TOGGLE]'}
-                    </div>
-                    <div
-                        ref={targetBadgeRef}
-                        className="px-3.5 py-1.5 rounded-full text-xs font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 backdrop-blur-md shadow-lg"
-                    >
-                        🎯 WAYPOINT: {Math.round(targetDistRef.current)}m
-                    </div>
-                </div>
-            </div>
-
-            {/* Bottom-Left Dashboard Gauge */}
-            <div className="absolute bottom-6 left-6 z-10 pointer-events-none flex items-end gap-4">
-                <div className="px-5 py-3 rounded-2xl bg-neutral-900/85 backdrop-blur-md border border-white/15 shadow-2xl flex flex-col min-w-[140px]">
-                    <div className="flex items-baseline gap-2">
-                        <span ref={speedRef} className="text-4xl font-mono font-black text-white tracking-tight">0</span>
-                        <span className="text-xs font-mono font-bold text-neutral-400 uppercase">KM/H</span>
-                    </div>
-                    <div className="mt-1 flex items-center justify-between gap-3">
-                        <span ref={gearRef} className="text-xs font-mono font-bold text-emerald-400">NEUTRAL</span>
-                        <span ref={nitroBadgeRef} className="text-[10px] font-bold px-2 py-0.5 rounded-md font-mono text-neutral-400 bg-white/5 border border-white/10">[E] TOGGLE NITRO</span>
-                    </div>
-                </div>
-            </div>
 
             {/* Bottom-Right Seeded Perlin Noise Radar Mini-Map */}
             {groundParams.showRadar && (
