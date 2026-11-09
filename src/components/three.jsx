@@ -35,6 +35,8 @@ function ThreeScene() {
     const cameraModeRef = useRef('auto');
     const [aiDriverActive, setAiDriverActive] = useState(false);
     const aiDriverActiveRef = useRef(false);
+    const [showLidars, setShowLidars] = useState(true);
+    const showLidarsRef = useRef(false);
     const targetCoordRef = useRef({ x: 120, y: 0, z: 0 });
     const targetDistRef = useRef(0);
 
@@ -278,6 +280,20 @@ function ThreeScene() {
             label: 'Autonomous Mode',
             onChange: (val) => setAiDriverActive(val)
         },
+        'Show LiDAR Rays': {
+            value: false,
+            label: 'Show LiDAR Rays',
+            onChange: (val) => {
+                setShowLidars(val);
+                showLidarsRef.current = val;
+            }
+        },
+        'Toggle LiDARs': button(() => {
+            setShowLidars(prev => {
+                showLidarsRef.current = !prev;
+                return !prev;
+            });
+        }),
         'New Target Beacon': button(() => {
             window.dispatchEvent(new CustomEvent('car:new-target'));
         })
@@ -337,6 +353,10 @@ function ThreeScene() {
     useEffect(() => {
         aiDriverActiveRef.current = aiDriverActive;
     }, [aiDriverActive]);
+
+    useEffect(() => {
+        showLidarsRef.current = showLidars;
+    }, [showLidars]);
 
     useEffect(() => {
         let isMounted = true;
@@ -467,7 +487,6 @@ function ThreeScene() {
         let currentTarget = sampleForwardRoadTarget(0.0, groundParamsRef.current.seed);
         targetCoordRef.current = currentTarget;
         let targetTimer = 0.0;
-
         const handleNewTarget = () => {
             const carPos = carBody ? carBody.translation() : { x: 0 };
             currentTarget = sampleForwardRoadTarget(carPos.x, groundParamsRef.current.seed);
@@ -923,15 +942,18 @@ function ThreeScene() {
                         const isCloseTouch = tdist <= 5.8;
                         // 2. Traversed checkpoint gate: car passes through checkpoint transverse plane within 5.0m lateral offset
                         const isPlaneTraversed = (carPos.x >= currentTarget.x - 1.2) && (carPos.x <= currentTarget.x + 3.5) && (Math.abs(localDz) <= 5.0);
-                        const isCheckpointHit = (isCloseTouch || isPlaneTraversed) && !isAirborne;
+                        const isCheckpointHit = isCloseTouch || (isPlaneTraversed && !isAirborne);
+
+                        const roadCenterForTarget = getProceduralRoadCurve(carPos.x, groundParamsRef.current.seed);
+                        const isCarOffRoadNearTarget = Math.abs(carPos.z - roadCenterForTarget.z) > 14.0;
 
                         if (isCheckpointHit) {
                             targetBeacon.triggerHit();
                             currentTarget = sampleForwardRoadTarget(currentTarget.x, groundParamsRef.current.seed);
                             targetCoordRef.current = currentTarget;
                             targetTimer = 0.0;
-                        } else if (carPos.x > currentTarget.x + 18.0) {
-                            // Only advance to next forward target if car has cleanly passed >18m beyond waypoint along +X
+                        } else if (carPos.x > currentTarget.x + (isCarOffRoadNearTarget ? 8.0 : 18.0) && tdist > 5.8) {
+                            // Advance to next forward target if car has cleanly passed waypoint along +X
                             currentTarget = sampleForwardRoadTarget(carPos.x, groundParamsRef.current.seed);
                             targetCoordRef.current = currentTarget;
                             targetTimer = 0.0;
@@ -943,7 +965,7 @@ function ThreeScene() {
                             const rawDist = computeRayDistanceToRoadEdge(carPos.x, carPos.z, carYaw + rayAngles[i], groundParamsRef.current.seed, 16.0, 60.0);
                             aiInputBuffer[i] = rawDist / 60.0;
 
-                            if (aiDriverActiveRef.current) {
+                            if (showLidarsRef.current) {
                                 const pIdx = i * 6;
                                 lidarPositions[pIdx] = carPos.x;
                                 lidarPositions[pIdx + 1] = carPos.y + 0.35;
@@ -968,7 +990,7 @@ function ThreeScene() {
                             }
                         }
 
-                        if (aiDriverActiveRef.current) {
+                        if (showLidarsRef.current) {
                             // 10th Beam: Holographic Target Beacon Radar Lock Beam
                             const tIdx = 9 * 6;
                             lidarPositions[tIdx] = carPos.x;
@@ -1008,7 +1030,7 @@ function ThreeScene() {
                         aiInputBuffer[25] = THREE.MathUtils.clamp(tdist / 300.0, 0.0, 1.0);
                         aiInputBuffer[26] = THREE.MathUtils.clamp(localDx / 300.0, -1.0, 1.0);
                         aiInputBuffer[27] = THREE.MathUtils.clamp(localDz / 16.0, -1.0, 1.0);
-                        aiInputBuffer[28] = Math.atan2(localDz, Math.max(localDx, 1e-4)) / Math.PI;
+                        aiInputBuffer[28] = Math.atan2(localDz, localDx) / Math.PI;
                         const groundH = ground ? ground.getHeightAt(carPos.x, carPos.z) : 0.0;
                         aiInputBuffer[29] = (carPos.y - groundH) > 0.9 ? 1.0 : 0.0;
 
@@ -1091,100 +1113,132 @@ function ThreeScene() {
                         const carYaw = Math.atan2(forward.z, forward.x);
                         const seed = groundParamsRef.current.seed;
 
-                        // 1. Current Road Centerline & Tangent at Car
+                        // 1. Current Road Centerline at Car & Off-road status
                         const roadAtCar = getProceduralRoadCurve(carPos.x, seed);
                         const lateralDeviation = carPos.z - roadAtCar.z; // + = right of center (+Z), - = left of center (-Z)
                         const absLatDev = Math.abs(lateralDeviation);
-                        const roadTangent = Math.atan2(roadAtCar.dz, 1.0);
+                        const roadHalfWidth = (roadParamsRef.current?.roadWidth ?? 32.0) * 0.5; // 16.0m
+                        const isOffRoad = absLatDev > (roadHalfWidth - 2.5); // Outside road corridor (>13.5m)
 
-                        // Normalize angle difference to [-PI, PI]
-                        const normAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
-                        const tangentHeadingErr = normAngle(roadTangent - carYaw);
-
-                        // 2. High-Speed Curvature Velocity Profile (Maximizes Achievable Speed on Road)
-                        // With high-speed aerodynamic downforce, chassis supports up to ~24.0 m/s^2 (~2.45g) cornering
-                        const MAX_LAT_ACCEL = 24.0;
-                        let safeTargetSpeed = BOOST_FORWARD_SPEED; // 100 m/s (~360 km/h) max on long straights
-
-                        // Lookahead horizon: scan upcoming road curvature up to 90m ahead in road corridor
-                        const scanOffsets = [0.0, 10.0, 22.0, 36.0, 52.0, 70.0, 90.0];
-                        for (let i = 0; i < scanOffsets.length; i++) {
-                            const distAhead = scanOffsets[i];
-                            const scanX = carPos.x + distAhead;
-                            const kappa = getCurvatureAt(scanX, seed);
-
-                            // Safe cornering speed at that curvature: v_safe = sqrt(a_lat / kappa)
-                            // Minimum 32.0 m/s (~115 km/h) even on tight bends, up to 100 m/s on straights
-                            const safeTurnSpeed = kappa > 0.001
-                                ? THREE.MathUtils.clamp(Math.sqrt(MAX_LAT_ACCEL / kappa), 32.0, BOOST_FORWARD_SPEED)
-                                : BOOST_FORWARD_SPEED;
-
-                            // Kinematic braking profile (18 m/s^2 comfortable deceleration):
-                            // v_current_max = sqrt(v_safe^2 + 2 * a_brake * distAhead)
-                            const allowedSpeed = Math.sqrt(safeTurnSpeed * safeTurnSpeed + 2.0 * 18.0 * distAhead);
-                            if (allowedSpeed < safeTargetSpeed) {
-                                safeTargetSpeed = allowedSpeed;
-                            }
-                        }
-
-                        // 3. Anti-Circling & Anti-Donut Safeguard
-                        // If heading deviates > 75 degrees (0.42 * PI) from road tangent, car has spun or is sliding sideways!
-                        const isFacingBackward = Math.abs(tangentHeadingErr) > (Math.PI * 0.42);
+                        // 2. Yellow LiDAR Beam Lock to Checkpoint (Target Beacon Vector in Car Local Frame)
+                        // localDx is forward distance to checkpoint, localDz is lateral offset (+ = right, - = left)
+                        // yellowLidarAngle: 0 = heading straight along yellow beam, >0 = target to right, <0 = target to left
+                        const yellowLidarAngle = Math.atan2(localDz, localDx);
 
                         let targetSteering = 0;
                         let targetThrottle = 1.0;
                         let targetShift = false;
 
-                        if (isFacingBackward) {
-                            // IMMEDIATE RECOVERY: break donut / spin loop instantly!
-                            // Counter-steer firmly toward road tangent (direction of road down +X)
-                            targetSteering = THREE.MathUtils.clamp(tangentHeadingErr * 1.4, -0.65, 0.65);
-                            // Reverse or cut throttle to stop spinning momentum
-                            targetThrottle = forwardSpeed > 1.0 ? -0.8 : 0.4;
-                            targetShift = false;
-                            aiIsBoosting = false;
-                        } else if (isAirborne) {
-                            // Airborne: cut throttle to land smoothly flush with road
-                            targetThrottle = 0.0;
-                            targetShift = false;
-                            aiIsBoosting = false;
-                            targetSteering = THREE.MathUtils.clamp(-lateralDeviation / 6.0, -0.5, 0.5);
-                        } else {
-                            // 4. AGGRESSIVE SPEED & TURBO NITRO LEVERAGING:
-                            // Keep full throttle engaged to push speeds to the absolute maximum achievable!
-                            targetThrottle = 1.0;
+                        if (isOffRoad) {
+                            // -------------------------------------------------------------
+                            // OFF-ROAD CHECKPOINT RECOVERY: Directly follow the yellow LiDAR!
+                            // -------------------------------------------------------------
+                            // Steer aggressively along the yellow LiDAR beam straight toward the checkpoint beacon
+                            targetSteering = THREE.MathUtils.clamp(yellowLidarAngle * 2.2, -1.0, 1.0);
 
-                            // AGGRESSIVELY LEVERAGE TURBO NITRO BOOST:
-                            // Whenever on the road (absLatDev < 12.0m) and pointing generally along the road corridor
-                            const canBoost = (absLatDev < 12.0) && (Math.abs(tangentHeadingErr) < 0.35) && (forwardSpeed > 8.0);
-                            targetShift = canBoost;
-                            aiIsBoosting = canBoost;
-
-                            // Only apply active trail braking when noticeably exceeding safe corner entry speed
-                            if (forwardSpeed > safeTargetSpeed + 3.0) {
+                            if (isAirborne) {
+                                targetThrottle = 0.25;
                                 targetShift = false;
                                 aiIsBoosting = false;
-                                targetThrottle = -THREE.MathUtils.clamp((forwardSpeed - safeTargetSpeed) / 6.0, 0.3, 1.0);
+                                targetSteering = THREE.MathUtils.clamp(yellowLidarAngle * 1.5, -0.65, 0.65);
+                            } else {
+                                const alignErr = Math.abs(yellowLidarAngle);
+
+                                if (alignErr < 0.35) {
+                                    // Well aligned with yellow LiDAR: Full throttle & turbo nitro boost back to tarmac!
+                                    targetThrottle = 1.0;
+                                    const canBoostOffRoad = (alignErr < 0.22) && (forwardSpeed > 10.0) && (tdist > 25.0);
+                                    targetShift = canBoostOffRoad;
+                                    aiIsBoosting = canBoostOffRoad;
+                                } else if (alignErr < 0.95) {
+                                    // Moderate heading angle: full throttle up to safe turning speed
+                                    targetThrottle = forwardSpeed > 36.0 ? 0.35 : 1.0;
+                                    targetShift = false;
+                                    aiIsBoosting = false;
+                                } else {
+                                    // Sharp turn needed to face yellow LiDAR: provide positive torque for turning grip
+                                    if (forwardSpeed < 12.0) {
+                                        targetThrottle = 0.95; // Power forward to give steering wheels turning bite
+                                    } else if (forwardSpeed > 22.0) {
+                                        targetThrottle = -0.35; // Gentle trail brake to pull nose into turn
+                                    } else {
+                                        targetThrottle = 0.65;
+                                    }
+                                    targetShift = false;
+                                    aiIsBoosting = false;
+                                }
+                            }
+                        } else {
+                            // -------------------------------------------------------------
+                            // ON-ROAD RACING MODE: High-speed corridor tracking & racing line
+                            // -------------------------------------------------------------
+                            const roadTangent = Math.atan2(roadAtCar.dz, 1.0);
+                            const normAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+                            const tangentHeadingErr = normAngle(roadTangent - carYaw);
+
+                            // High-Speed Curvature Velocity Profile
+                            const MAX_LAT_ACCEL = 24.0;
+                            let safeTargetSpeed = BOOST_FORWARD_SPEED; // 100 m/s (~360 km/h) max on long straights
+
+                            // Lookahead horizon: scan upcoming road curvature up to 90m ahead in road corridor
+                            const scanOffsets = [0.0, 10.0, 22.0, 36.0, 52.0, 70.0, 90.0];
+                            for (let i = 0; i < scanOffsets.length; i++) {
+                                const distAhead = scanOffsets[i];
+                                const scanX = carPos.x + distAhead;
+                                const kappa = getCurvatureAt(scanX, seed);
+
+                                const safeTurnSpeed = kappa > 0.001
+                                    ? THREE.MathUtils.clamp(Math.sqrt(MAX_LAT_ACCEL / kappa), 32.0, BOOST_FORWARD_SPEED)
+                                    : BOOST_FORWARD_SPEED;
+
+                                const allowedSpeed = Math.sqrt(safeTurnSpeed * safeTurnSpeed + 2.0 * 18.0 * distAhead);
+                                if (allowedSpeed < safeTargetSpeed) {
+                                    safeTargetSpeed = allowedSpeed;
+                                }
                             }
 
-                            // 5. ACTIVE TARGET HUNTING (No Centerline Camping!):
-                            // Directly hunt down the target checkpoint beacon!
-                            const tHeading = Math.atan2(localDz, Math.max(localDx, 1.5));
+                            // Anti-Spin / Anti-Donut Safeguard on tarmac
+                            const isFacingBackward = Math.abs(tangentHeadingErr) > (Math.PI * 0.42);
 
-                            // Edge guard: ONLY intervenes if car approaches outer road shoulder (> 10.5m of 16m)
-                            let edgeGuard = 0.0;
-                            if (absLatDev > 10.5) {
-                                const excess = (absLatDev - 10.5) / 5.5;
-                                edgeGuard = -Math.sign(lateralDeviation) * excess * 0.75;
-                            }
+                            if (isFacingBackward) {
+                                targetSteering = THREE.MathUtils.clamp(tangentHeadingErr * 1.4, -0.65, 0.65);
+                                targetThrottle = forwardSpeed > 2.0 ? -0.8 : 0.6;
+                                targetShift = false;
+                                aiIsBoosting = false;
+                            } else if (isAirborne) {
+                                targetThrottle = 0.0;
+                                targetShift = false;
+                                aiIsBoosting = false;
+                                targetSteering = THREE.MathUtils.clamp(-lateralDeviation / 6.0, -0.5, 0.5);
+                            } else {
+                                targetThrottle = 1.0;
 
-                            // Steer aggressively toward target beacon + road tangent flow
-                            targetSteering = tHeading * 1.35 + tangentHeadingErr * 0.65 + edgeGuard;
+                                const canBoost = (absLatDev < 11.0) && (Math.abs(tangentHeadingErr) < 0.35) && (forwardSpeed > 8.0);
+                                targetShift = canBoost;
+                                aiIsBoosting = canBoost;
 
-                            // 6. Neural Network Model Action Blending (when ONNX model is available and running)
-                            if (onnxSession && aiActionOutput && absLatDev < 12.0) {
-                                const modelSteer = THREE.MathUtils.clamp(aiActionOutput[0], -1.0, 1.0);
-                                targetSteering = THREE.MathUtils.lerp(targetSteering, modelSteer, 0.25);
+                                if (forwardSpeed > safeTargetSpeed + 3.0) {
+                                    targetShift = false;
+                                    aiIsBoosting = false;
+                                    targetThrottle = -THREE.MathUtils.clamp((forwardSpeed - safeTargetSpeed) / 6.0, 0.3, 1.0);
+                                }
+
+                                // Target hunting directly along yellow LiDAR angle
+                                const tHeading = yellowLidarAngle;
+
+                                // Edge guard only near road shoulder (10.5m to 14.0m)
+                                let edgeGuard = 0.0;
+                                if (absLatDev > 10.5) {
+                                    const excess = (absLatDev - 10.5) / 3.5;
+                                    edgeGuard = -Math.sign(lateralDeviation) * excess * 0.65;
+                                }
+
+                                targetSteering = tHeading * 1.35 + tangentHeadingErr * 0.65 + edgeGuard;
+
+                                if (onnxSession && aiActionOutput && absLatDev < 12.0) {
+                                    const modelSteer = THREE.MathUtils.clamp(aiActionOutput[0], -1.0, 1.0);
+                                    targetSteering = THREE.MathUtils.lerp(targetSteering, modelSteer, 0.25);
+                                }
                             }
                         }
 
@@ -1275,10 +1329,16 @@ function ThreeScene() {
 
                     let targetSteer = 0;
                     if (aiDriverActiveRef.current) {
-                        // Speed-adaptive steering lock for AI: full 0.40 rad (~23 deg) at low speed,
-                        // tapering smoothly to 0.18 rad (~10.3 deg) at 360 km/h for responsive target interception
+                        const roadHalfWidth = (roadParamsRef.current?.roadWidth ?? 32.0) * 0.5;
+                        const roadAtCar = getProceduralRoadCurve(carPos.x, groundParamsRef.current.seed);
+                        const isOffRoadNow = Math.abs(carPos.z - roadAtCar.z) > (roadHalfWidth - 2.5);
+
+                        // Speed-adaptive steering lock for AI: full 0.42 rad (~24 deg) off-road to quickly lock onto yellow beam,
+                        // tapering smoothly to 0.18 rad (~10.3 deg) at 360 km/h on tarmac for stable highway handling
                         const aiSpeedRatio = THREE.MathUtils.clamp((forwardSpeed - 15.0) / 75.0, 0.0, 1.0);
-                        const maxAiSteer = THREE.MathUtils.lerp(0.40, 0.18, aiSpeedRatio);
+                        const maxAiSteer = isOffRoadNow
+                            ? THREE.MathUtils.lerp(0.42, 0.28, THREE.MathUtils.clamp((forwardSpeed - 15.0) / 45.0, 0.0, 1.0))
+                            : THREE.MathUtils.lerp(0.40, 0.18, aiSpeedRatio);
                         targetSteer = -aiSteerFactor * maxAiSteer;
                     } else {
                         if (keys.a) targetSteer = maxSteerAngle;
@@ -1785,41 +1845,6 @@ function ThreeScene() {
                 style={{ background: 'radial-gradient(circle at center, transparent 40%, rgba(0,0,0,0.6) 100%)' }}
             />
 
-            {/* Top-Left Telemetry & Autonomous Navigation Mode HUD */}
-            <div className="absolute top-6 left-6 z-10 pointer-events-none flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                    <div
-                        ref={aiBadgeRef}
-                        className={`px-3.5 py-1.5 rounded-full text-xs font-mono font-bold tracking-wider backdrop-blur-md border shadow-lg ${
-                            aiDriverActive
-                                ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50 shadow-[0_0_20px_rgba(16,185,129,0.35)] animate-pulse'
-                                : 'bg-neutral-900/80 text-neutral-400 border-white/10'
-                        }`}
-                    >
-                        {aiDriverActive ? '🤖 AI AUTONOMOUS PILOT: ENGAGED (360 KM/H)' : '🏎️ MANUAL CONTROL [T: AI | E: NITRO TOGGLE]'}
-                    </div>
-                    <div
-                        ref={targetBadgeRef}
-                        className="px-3.5 py-1.5 rounded-full text-xs font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 backdrop-blur-md shadow-lg"
-                    >
-                        🎯 WAYPOINT: {Math.round(targetDistRef.current)}m
-                    </div>
-                </div>
-            </div>
-
-            {/* Bottom-Left Dashboard Gauge */}
-            <div className="absolute bottom-6 left-6 z-10 pointer-events-none flex items-end gap-4">
-                <div className="px-5 py-3 rounded-2xl bg-neutral-900/85 backdrop-blur-md border border-white/15 shadow-2xl flex flex-col min-w-[140px]">
-                    <div className="flex items-baseline gap-2">
-                        <span ref={speedRef} className="text-4xl font-mono font-black text-white tracking-tight">0</span>
-                        <span className="text-xs font-mono font-bold text-neutral-400 uppercase">KM/H</span>
-                    </div>
-                    <div className="mt-1 flex items-center justify-between gap-3">
-                        <span ref={gearRef} className="text-xs font-mono font-bold text-emerald-400">NEUTRAL</span>
-                        <span ref={nitroBadgeRef} className="text-[10px] font-bold px-2 py-0.5 rounded-md font-mono text-neutral-400 bg-white/5 border border-white/10">[E] TOGGLE NITRO</span>
-                    </div>
-                </div>
-            </div>
 
             {/* Bottom-Right Seeded Perlin Noise Radar Mini-Map */}
             {groundParams.showRadar && (
