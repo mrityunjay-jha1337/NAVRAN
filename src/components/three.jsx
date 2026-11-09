@@ -4,7 +4,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { useControls, button, folder, Leva } from 'leva';
-import { Ground, DEFAULT_GROUND_CONFIG, drawPerlinNoiseRadar } from './Ground.js';
+import { Ground, DEFAULT_GROUND_CONFIG, drawPerlinNoiseRadar, getRandomSeed } from './Ground.js';
+import { Road, DEFAULT_ROAD_CONFIG } from './Road.js';
 
 function ThreeScene() {
     const mountRef = useRef(null);
@@ -12,6 +13,7 @@ function ThreeScene() {
     const gearRef = useRef(null);
     const nitroBadgeRef = useRef(null);
     const cameraBadgeRef = useRef(null);
+    const speedBlurRef = useRef(null);
     const radarCanvasRef = useRef(null);
     const coordsRef = useRef(null);
 
@@ -22,13 +24,15 @@ function ThreeScene() {
 
     // References to active simulation entities
     const groundRef = useRef(null);
+    const roadRef = useRef(null);
     const carBodyRef = useRef(null);
     const carSceneRef = useRef(null);
+    const setGroundParamsRef = useRef(null);
 
     // -------------------------------------------------------------
     // Leva Controls for Real-Time Smooth Perlin Noise Ground Tuning
     // -------------------------------------------------------------
-    const groundParams = useControls('Terrain Settings', {
+    const [groundParams, setGroundParams] = useControls('Terrain Settings', () => ({
         'Procedural World': folder({
             seed: {
                 value: DEFAULT_GROUND_CONFIG.seed,
@@ -102,6 +106,12 @@ function ThreeScene() {
             },
         }),
         'Simulation Actions': folder({
+            'Randomize World (New Seed) 🎲': button(() => {
+                const newSeed = getRandomSeed();
+                if (setGroundParamsRef.current) {
+                    setGroundParamsRef.current({ seed: newSeed });
+                }
+            }),
             'Respawn Car (R)': button(() => {
                 window.dispatchEvent(new CustomEvent('car:respawn'));
             }),
@@ -109,7 +119,47 @@ function ThreeScene() {
                 window.dispatchEvent(new CustomEvent('ground:rebuild-physics'));
             }),
         })
+    }), []);
+    useEffect(() => {
+        setGroundParamsRef.current = setGroundParams;
+    }, [setGroundParams]);
+
+    const roadParams = useControls('Mountain Road & Curves', {
+        roadCarve: {
+            value: DEFAULT_GROUND_CONFIG.roadCarve ?? true,
+            label: 'Carve Road in Mountains'
+        },
+        showRoadMesh: {
+            value: DEFAULT_ROAD_CONFIG.showRoadMesh ?? true,
+            label: 'Show Road Wireframe'
+        },
+        roadWireframeColor: {
+            value: DEFAULT_ROAD_CONFIG.roadWireframeColor ?? '#00a2ff',
+            label: 'Road Wireframe Color'
+        },
+        roadWidth: {
+            value: DEFAULT_GROUND_CONFIG.roadWidth ?? 32.0,
+            min: 16.0,
+            max: 50.0,
+            step: 1.0,
+            label: 'Road Width (m)'
+        },
+        shoulderWidth: {
+            value: DEFAULT_GROUND_CONFIG.shoulderWidth ?? 20.0,
+            min: 8.0,
+            max: 35.0,
+            step: 1.0,
+            label: 'Mountain Bank Width (m)'
+        },
+        roadElevationScale: {
+            value: DEFAULT_GROUND_CONFIG.roadElevationScale ?? 1.0,
+            min: 0.2,
+            max: 2.5,
+            step: 0.1,
+            label: 'Uphill/Downhill Scale'
+        }
     });
+    const roadParamsRef = useRef(roadParams);
 
     const carVisualParams = useControls('Vehicle Visuals', {
         carWireframe: {
@@ -176,7 +226,7 @@ function ThreeScene() {
             label: 'Downforce Grip'
         },
         bounceDamper: {
-            value: 1.2,
+            value: 0.4,
             min: 0.0,
             max: 3.0,
             step: 0.1,
@@ -184,17 +234,56 @@ function ThreeScene() {
         }
     });
 
+    const drivingDynamics = useControls('Vehicle Dynamics & FX', {
+        driftPhysics: {
+            value: true,
+            label: 'Drift Dynamics'
+        },
+        screenShake: {
+            value: true,
+            label: 'Shift Screen Shake'
+        },
+        shakeIntensity: {
+            value: 1.0,
+            min: 0.2,
+            max: 2.5,
+            step: 0.1,
+            label: 'Shake Multiplier'
+        },
+        speedBlur: {
+            value: true,
+            label: 'Shift Speed Background Blur'
+        }
+    });
+
     const groundParamsRef = useRef(groundParams);
     const tyreParamsRef = useRef(tyreParams);
+    const drivingDynamicsRef = useRef(drivingDynamics);
     const rebuildWheelCollidersRef = useRef(null);
 
-    // Propagate Leva changes to active Ground instance
     useEffect(() => {
-        groundParamsRef.current = groundParams;
+        drivingDynamicsRef.current = drivingDynamics;
+    }, [drivingDynamics]);
+
+    // Propagate Leva changes to active Ground & Road instances
+    useEffect(() => {
+        roadParamsRef.current = roadParams;
+        const mergedGroundParams = { ...groundParams, ...roadParams };
+        groundParamsRef.current = mergedGroundParams;
         if (groundRef.current) {
-            groundRef.current.updateParams(groundParams, carBodyRef.current);
+            groundRef.current.updateParams(mergedGroundParams, carBodyRef.current);
         }
-    }, [groundParams]);
+        if (roadRef.current) {
+            roadRef.current.updateConfig({
+                seed: groundParams.seed,
+                roadWidth: roadParams.roadWidth,
+                shoulderWidth: roadParams.shoulderWidth,
+                elevationScale: roadParams.roadElevationScale,
+                showRoadMesh: roadParams.showRoadMesh,
+                roadWireframeColor: roadParams.roadWireframeColor,
+            });
+        }
+    }, [groundParams, roadParams]);
 
     // Propagate Leva changes to wheel colliders in real time
     useEffect(() => {
@@ -225,6 +314,7 @@ function ThreeScene() {
         let carBody = null;
         let carScene = null;
         let ground = null;
+        let road = null;
         let lastTime = performance.now();
 
         // Driving Tuning Parameters (Tuned for smooth, realistic sports car physics)
@@ -251,7 +341,16 @@ function ThreeScene() {
         let steerFR = null;
         const wheels = [];
         let currentSteerAngle = 0;
-        const dynamicObstacles = [];
+
+        // Screen Shake & Drift Dynamic State Variables
+        const baseCamPos = new THREE.Vector3(-6.5, 2.85, 0);
+        let userZoomDist = 7.0; // Interactive scroll wheel zoom distance (default 7.0m)
+        let currentShakeIntensity = 0;
+        let screenShakePunch = 0;
+        let shakeTime = 0;
+        let currentDriftFactor = 0;
+        let visualRollAngle = 0;
+        let currentSpeedBlur = 0;
 
         const container = mountRef.current;
         if (!container) return;
@@ -304,6 +403,17 @@ function ThreeScene() {
         ground = new Ground(scene, groundParamsRef.current);
         groundRef.current = ground;
 
+        // 5b. Mountain Pass Road (Infinite Blue Wireframe Ribbon)
+        road = new Road(scene, {
+            seed: groundParamsRef.current.seed,
+            roadWidth: roadParamsRef.current.roadWidth,
+            shoulderWidth: roadParamsRef.current.shoulderWidth,
+            elevationScale: roadParamsRef.current.roadElevationScale,
+            showRoadMesh: roadParamsRef.current.showRoadMesh,
+            roadWireframeColor: roadParamsRef.current.roadWireframeColor,
+        });
+        roadRef.current = road;
+
         // 6. Lighting with Dynamic Car-Proximity Shadow Mapping
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
         scene.add(ambientLight);
@@ -352,14 +462,22 @@ function ThreeScene() {
             prevCarCenter = new THREE.Vector3(0, spawnY + 0.85, 0);
             isDrivingState = false;
             currentCamDir = -1.0;
+            userZoomDist = 7.0;
             currentFollowDist = 7.0;
             currentFollowHeight = 2.1;
             userHasManuallyOrbited = false;
-            camera.position.set(-6.8, spawnY + 2.4, 0);
+            baseCamPos.set(-6.8, spawnY + 2.4, 0);
+            camera.position.copy(baseCamPos);
             currentLookTarget.set(0, spawnY + 1.0, 0);
             camera.lookAt(currentLookTarget);
             controls.target.set(0, spawnY + 0.85, 0);
             controls.update();
+            currentShakeIntensity = 0;
+            screenShakePunch = 0;
+            currentDriftFactor = 0;
+            visualRollAngle = 0;
+            currentSpeedBlur = 0;
+            if (speedBlurRef.current) speedBlurRef.current.style.opacity = '0';
         };
 
         const handleCarRespawn = () => {
@@ -382,7 +500,8 @@ function ThreeScene() {
             s: false,
             a: false,
             d: false,
-            shift: false
+            shift: false,
+            space: false
         };
 
         const handleKeyDown = (e) => {
@@ -390,15 +509,27 @@ function ThreeScene() {
             const code = e.code || '';
 
             // Prevent arrow keys or space from scrolling the page
-            if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'space'].includes(k)) {
+            if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'space', ' '].includes(k) || code === 'Space') {
                 e.preventDefault();
             }
 
-            if (k === 'w' || code === 'KeyW' || k === 'arrowup' || code === 'ArrowUp') keys.w = true;
+            if (k === 'w' || code === 'KeyW' || k === 'arrowup' || code === 'ArrowUp') {
+                if (!keys.w && keys.shift) {
+                    screenShakePunch = 0.045;
+                }
+                keys.w = true;
+            }
             if (k === 's' || code === 'KeyS' || k === 'arrowdown' || code === 'ArrowDown') keys.s = true;
             if (k === 'a' || code === 'KeyA' || k === 'arrowleft' || code === 'ArrowLeft') keys.a = true;
             if (k === 'd' || code === 'KeyD' || k === 'arrowright' || code === 'ArrowRight') keys.d = true;
-            if (k === 'shift' || code === 'ShiftLeft' || code === 'ShiftRight' || e.shiftKey) keys.shift = true;
+            if (k === ' ' || code === 'Space') keys.space = true;
+            if (k === 'shift' || code === 'ShiftLeft' || code === 'ShiftRight' || e.shiftKey) {
+                // Tactical punch only if W is also pressed (Shift without W does not trigger boost)
+                if (!keys.shift && keys.w) {
+                    screenShakePunch = 0.045;
+                }
+                keys.shift = true;
+            }
 
             // R: Reset car to ground position & reset camera
             if (k === 'r' || code === 'KeyR') {
@@ -424,6 +555,7 @@ function ThreeScene() {
             if (k === 's' || code === 'KeyS' || k === 'arrowdown' || code === 'ArrowDown') keys.s = false;
             if (k === 'a' || code === 'KeyA' || k === 'arrowleft' || code === 'ArrowLeft') keys.a = false;
             if (k === 'd' || code === 'KeyD' || k === 'arrowright' || code === 'ArrowRight') keys.d = false;
+            if (k === ' ' || code === 'Space') keys.space = false;
             if (k === 'shift' || code === 'ShiftLeft' || code === 'ShiftRight') keys.shift = false;
         };
 
@@ -433,15 +565,23 @@ function ThreeScene() {
             keys.a = false;
             keys.d = false;
             keys.shift = false;
+            keys.space = false;
         };
 
         const handleCanvasFocus = () => {
             renderer.domElement.focus();
         };
 
+        // Zoom In / Out with Mouse Scroll Wheel
+        const handleWheel = (e) => {
+            const zoomDelta = e.deltaY * 0.005;
+            userZoomDist = THREE.MathUtils.clamp(userZoomDist + zoomDelta, 4.0, 24.0);
+        };
+
         window.addEventListener('keydown', handleKeyDown);
         window.addEventListener('keyup', handleKeyUp);
         window.addEventListener('blur', handleBlur);
+        window.addEventListener('wheel', handleWheel, { passive: true });
         container.addEventListener('click', handleCanvasFocus);
 
         // 10. Asynchronously Initialize Rapier WASM & Create Physics World
@@ -549,52 +689,6 @@ function ThreeScene() {
                     tyreParamsRef.current.tyreRadius
                 );
 
-                // Obstacle Generator Helper (Smashable crates scattered along the terrain)
-                function addObstacle(x, z, width = 1.5, height = 1.5, depth = 1.5, mass = 15, color = 0xd97736, yOffset = null) {
-                    const terrainH = ground.getHeightAt(x, z);
-                    const y = yOffset !== null ? terrainH + yOffset : terrainH + height / 2;
-
-                    const geom = new THREE.BoxGeometry(width, height, depth);
-                    const mat = new THREE.MeshStandardMaterial({
-                        color: color,
-                        roughness: 0.8,
-                        metalness: 0.1
-                    });
-                    const mesh = new THREE.Mesh(geom, mat);
-                    mesh.position.set(x, y, z);
-                    mesh.castShadow = true;
-                    mesh.receiveShadow = true;
-                    scene.add(mesh);
-
-                    const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
-                        .setTranslation(x, y, z)
-                        .setLinearDamping(0.3)
-                        .setAngularDamping(0.5)
-                        .setCcdEnabled(true);
-                    const body = world.createRigidBody(bodyDesc);
-
-                    const colliderDesc = RAPIER.ColliderDesc.cuboid(width / 2, height / 2, depth / 2)
-                        .setFriction(0.2)
-                        .setRestitution(0.4)
-                        .setMass(mass);
-                    world.createCollider(colliderDesc, body);
-
-                    dynamicObstacles.push({ mesh, body });
-                }
-
-                // Stack of lightweight wooden crates ahead of car on the smooth surface
-                addObstacle(11, -1.6, 1.4, 1.4, 1.4, 15, 0xd97736);
-                addObstacle(11,  0.0, 1.4, 1.4, 1.4, 15, 0xc26227);
-                addObstacle(11,  1.6, 1.4, 1.4, 1.4, 15, 0xd97736);
-                addObstacle(11, -0.8, 1.4, 1.4, 1.4, 12, 0xe08b4c, 2.1);
-                addObstacle(11,  0.8, 1.4, 1.4, 1.4, 12, 0xe08b4c, 2.1);
-
-                // Scatter crates across nearby rolling hills
-                addObstacle(18,  -7, 1.5, 1.5, 1.5, 15, 0x8a5d3b);
-                addObstacle(18,   7, 1.5, 1.5, 1.5, 15, 0x8a5d3b);
-                addObstacle(-12,  -8, 1.5, 1.5, 1.5, 15, 0x5a6375);
-                addObstacle(-12,   8, 1.5, 1.5, 1.5, 15, 0x5a6375);
-
                 // Load 3D Car GLB Model
                 const loader = new GLTFLoader();
                 loader.load(
@@ -659,6 +753,10 @@ function ThreeScene() {
                 ground.update(carPos, delta, directionalLight.position, directionalLight.color, ambientLight.color);
             }
 
+            if (road && carBody) {
+                road.update(carBody.translation());
+            }
+
             if (world) {
                 if (carBody) {
                     const rot = carBody.rotation();
@@ -675,14 +773,49 @@ function ThreeScene() {
                     const forwardSpeed = currentVel.dot(forward);
                     const lateralSpeed = currentVel.dot(lateral);
                     const absSpeed = Math.abs(forwardSpeed);
+                    const speedKmh = absSpeed * 3.6;
 
-                    // 1. Progressive Lateral Tyre Grip (Smooth tracking, prevents slide down slopes)
+                    // 1. Drift Physics & Lateral Grip Modulation
+                    const driftEnabled = drivingDynamicsRef.current?.driftPhysics ?? true;
+                    const hasSteerInput = Math.abs(currentSteerAngle) > 0.05;
+                    const isHandbrake = keys.space;
+                    const isBrakeDrift = keys.s && forwardSpeed > 4.0 && hasSteerInput;
+                    const isPowerSlide = (keys.shift && keys.w && hasSteerInput && speedKmh > 20.0) || (hasSteerInput && speedKmh > 36.0);
+                    const isAlreadySliding = Math.abs(lateralSpeed) > 1.3 && absSpeed > 3.0;
+
+                    let wantsDrift = false;
+                    if (driftEnabled && absSpeed > 2.0) {
+                        if (isHandbrake || isBrakeDrift || isPowerSlide || isAlreadySliding) {
+                            wantsDrift = true;
+                        }
+                    }
+
+                    const targetDriftFactor = wantsDrift ? 1.0 : 0.0;
+                    const driftTransitionSpeed = wantsDrift ? 10.0 : 4.5;
+                    currentDriftFactor = THREE.MathUtils.damp(currentDriftFactor, targetDriftFactor, driftTransitionSpeed, delta);
+
+                    // Dynamic lateral tyre friction:
+                    // Normal grip cancels 85% of lateral speed per frame (smooth tracking).
+                    // In drift, grip drops to ~20%, allowing the vehicle to slide sideways with momentum while retaining control!
                     if (Math.abs(lateralSpeed) > 0.01) {
-                        const gripImpulse = -lateralSpeed * CAR_MASS * Math.min(10.0 * delta, 0.85);
+                        const maxGrip = THREE.MathUtils.lerp(0.85, 0.20, currentDriftFactor);
+                        const gripRate = THREE.MathUtils.lerp(10.0, 3.5, currentDriftFactor);
+                        const gripImpulse = -lateralSpeed * CAR_MASS * Math.min(gripRate * delta, maxGrip);
                         carBody.applyImpulse({
                             x: lateral.x * gripImpulse,
                             y: lateral.y * gripImpulse,
                             z: lateral.z * gripImpulse
+                        }, true);
+                    }
+
+                    // Handbrake deceleration drag when Space is held
+                    if (keys.space && absSpeed > 0.3) {
+                        const handbrakeBrake = CAR_MASS * 12.0 * delta;
+                        const brakeDir = forwardSpeed > 0 ? -1 : 1;
+                        carBody.applyImpulse({
+                            x: forward.x * handbrakeBrake * brakeDir,
+                            y: forward.y * handbrakeBrake * brakeDir,
+                            z: forward.z * handbrakeBrake * brakeDir
                         }, true);
                     }
 
@@ -739,16 +872,17 @@ function ThreeScene() {
                         }
                     }
 
-                    // 3. Realistic Speed-Sensitive Steering with Framerate-Independent Damping
-                    const speedKmh = absSpeed * 3.6;
+                    // 3. Realistic Speed-Sensitive Steering with Drift Counter-Steer Authority
                     const speedFactor = THREE.MathUtils.clamp(1.0 - (speedKmh / 110) * 0.78, 0.20, 1.0);
-                    const maxSteerAngle = 0.30 * speedFactor;
+                    const normalMaxSteer = 0.30 * speedFactor;
+                    const driftMaxSteer = 0.40; // ~23° counter-steer lock during drift
+                    const maxSteerAngle = THREE.MathUtils.lerp(normalMaxSteer, driftMaxSteer, currentDriftFactor);
 
                     let targetSteer = 0;
                     if (keys.a) targetSteer = maxSteerAngle;
                     if (keys.d) targetSteer = -maxSteerAngle;
 
-                    const steerDampSpeed = (targetSteer === 0) ? 14.0 : 8.0;
+                    const steerDampSpeed = (targetSteer === 0) ? 14.0 : (currentDriftFactor > 0.3 ? 12.0 : 8.0);
                     currentSteerAngle = THREE.MathUtils.damp(currentSteerAngle, targetSteer, steerDampSpeed, delta);
 
                     if (steerFL) steerFL.rotation.y = currentSteerAngle;
@@ -764,10 +898,27 @@ function ThreeScene() {
                     let targetYawRate = 0;
                     if (absSpeed > 0.15) {
                         const maxYawRate = THREE.MathUtils.damp(2.2, 1.0, 3.0, THREE.MathUtils.clamp(speedKmh / 90, 0, 1));
-                        targetYawRate = (forwardSpeed / WHEELBASE) * Math.tan(currentSteerAngle);
-                        targetYawRate = THREE.MathUtils.clamp(targetYawRate, -maxYawRate, maxYawRate);
+                        const kinematicYaw = (forwardSpeed / WHEELBASE) * Math.tan(currentSteerAngle);
+
+                        if (currentDriftFactor > 0.05) {
+                            // Slip angle (radians)
+                            const slipAngle = Math.atan2(lateralSpeed, Math.max(forwardSpeed, 0.5));
+                            // Caster self-aligning stabilizing torque
+                            const casterTorque = -slipAngle * 2.4;
+                            // Driver direct counter-steer torque
+                            const driverDriftTorque = currentSteerAngle * 4.2;
+                            // Handbrake flick kick
+                            const handbrakeKick = keys.space && Math.abs(currentSteerAngle) > 0.02 ? Math.sign(currentSteerAngle) * 1.1 : 0;
+
+                            const dynamicDriftYaw = kinematicYaw * 0.35 + driverDriftTorque * 0.65 + casterTorque * 0.35 + handbrakeKick;
+                            const blendedYaw = THREE.MathUtils.lerp(kinematicYaw, dynamicDriftYaw, currentDriftFactor);
+                            targetYawRate = THREE.MathUtils.clamp(blendedYaw, -maxYawRate * 1.5, maxYawRate * 1.5);
+                        } else {
+                            targetYawRate = THREE.MathUtils.clamp(kinematicYaw, -maxYawRate, maxYawRate);
+                        }
                     }
-                    const newYaw = THREE.MathUtils.damp(currentYaw, targetYawRate, 8.0, delta);
+                    const yawDampRate = currentDriftFactor > 0.2 ? 10.0 : 8.0;
+                    const newYaw = THREE.MathUtils.damp(currentYaw, targetYawRate, yawDampRate, delta);
                     const newPitch = THREE.MathUtils.damp(currentPitch, 0.0, 1.5, delta);
                     const newRoll = THREE.MathUtils.damp(currentRoll, 0.0, 2.5, delta);
 
@@ -835,9 +986,10 @@ function ThreeScene() {
                         }
                     }
 
-                    // 5. Dynamic Camera FOV with smooth damping
-                    const targetFov = isBoosting ? 80 : 75;
-                    camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 4.0, delta);
+                    // 5. Dynamic Camera FOV with smooth damping (Gentle 78° on Shift+W for high-speed sensation)
+                    const isShiftBoosting = keys.shift && keys.w;
+                    const targetFov = isShiftBoosting ? 78 : 75;
+                    camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 1.4, delta);
                     camera.updateProjectionMatrix();
 
                     // Live HUD Updates
@@ -852,7 +1004,7 @@ function ThreeScene() {
                         } else if (absSpeed < 0.2) {
                             gearRef.current.innerText = 'NEUTRAL';
                             gearRef.current.className = 'text-xs font-mono font-bold text-neutral-400';
-                        } else if (isBoosting) {
+                        } else if (isShiftBoosting) {
                             gearRef.current.innerText = 'NITRO 🔥';
                             gearRef.current.className = 'text-xs font-mono font-bold text-amber-400 animate-pulse';
                         } else {
@@ -862,15 +1014,15 @@ function ThreeScene() {
                     }
 
                     if (nitroBadgeRef.current) {
-                        if (isBoosting) {
+                        if (isShiftBoosting) {
                             nitroBadgeRef.current.innerText = '🔥 TURBO ACTIVE';
-                            nitroBadgeRef.current.className = 'text-xs font-bold px-2 py-0.5 rounded-md font-mono bg-gradient-to-r from-amber-500 to-orange-500 text-black font-extrabold shadow-[0_0_15px_rgba(245,158,11,0.9)] animate-pulse';
+                            nitroBadgeRef.current.className = 'text-[11px] font-bold px-2 py-0.5 rounded-md font-mono bg-gradient-to-r from-amber-500 to-orange-500 text-black font-extrabold shadow-[0_0_15px_rgba(245,158,11,0.9)] animate-pulse';
                         } else if (keys.shift) {
                             nitroBadgeRef.current.innerText = '⚡ HOLD W TO BOOST';
-                            nitroBadgeRef.current.className = 'text-xs font-bold px-2 py-0.5 rounded-md font-mono bg-cyan-500/20 text-cyan-300 border border-cyan-500/40';
+                            nitroBadgeRef.current.className = 'text-[11px] font-bold px-2 py-0.5 rounded-md font-mono bg-cyan-500/20 text-cyan-300 border border-cyan-500/40';
                         } else {
                             nitroBadgeRef.current.innerText = 'HOLD SHIFT';
-                            nitroBadgeRef.current.className = 'text-xs font-bold px-2 py-0.5 rounded-md font-mono text-neutral-400 bg-white/5';
+                            nitroBadgeRef.current.className = 'text-[11px] font-bold px-2 py-0.5 rounded-md font-mono text-neutral-400 bg-white/5';
                         }
                     }
                 }
@@ -890,6 +1042,25 @@ function ThreeScene() {
                     carScene.position.set(translation.x, translation.y, translation.z);
                     carScene.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w);
 
+                    const linvel = carBody.linvel();
+                    const currentVel = new THREE.Vector3(linvel.x, linvel.y, linvel.z);
+                    const carQuat = new THREE.Quaternion(rotation.x, rotation.y, rotation.z, rotation.w);
+                    const forward = new THREE.Vector3(1, 0, 0).applyQuaternion(carQuat);
+                    const lateral = new THREE.Vector3(0, 0, 1).applyQuaternion(carQuat);
+                    const forwardSpeed = currentVel.dot(forward);
+                    const lateralSpeed = currentVel.dot(lateral);
+                    const absSpeed = Math.abs(forwardSpeed);
+                    const speedKmh = absSpeed * 3.6;
+                    const isDrifting = currentDriftFactor > 0.18 && (Math.abs(lateralSpeed) > 0.5 || keys.space) && absSpeed > 1.8;
+
+                    // Visual suspension weight transfer roll & pitch
+                    const targetVisualRoll = THREE.MathUtils.clamp(-lateralSpeed * 0.014, -0.07, 0.07);
+                    visualRollAngle = THREE.MathUtils.damp(visualRollAngle, targetVisualRoll, 10.0, delta);
+                    if (Math.abs(visualRollAngle) > 0.001) {
+                        const rollQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), visualRollAngle);
+                        carScene.quaternion.multiply(rollQuat);
+                    }
+
                     const carCenter = new THREE.Vector3(translation.x, translation.y + 0.85, translation.z);
 
                     // Dynamic Shadow Follow
@@ -902,16 +1073,13 @@ function ThreeScene() {
                     }
                     const carDelta = new THREE.Vector3().subVectors(carCenter, prevCarCenter);
                     prevCarCenter.copy(carCenter);
-                    camera.position.add(carDelta);
+                    baseCamPos.add(carDelta);
                     currentLookTarget.add(carDelta);
 
                     // Safety net respawn: only if car falls through into the void
                     if (translation.y < -40.0) {
                         respawnCar();
                     }
-
-                    const carQuat = new THREE.Quaternion(rotation.x, rotation.y, rotation.z, rotation.w);
-                    const forward = new THREE.Vector3(1, 0, 0).applyQuaternion(carQuat);
 
                     // Update live GPS coordinates & Seeded Perlin Noise Radar
                     if (coordsRef.current) {
@@ -923,11 +1091,7 @@ function ThreeScene() {
                         drawPerlinNoiseRadar(radarCanvasRef.current, translation.x, translation.z, heading, groundParamsRef.current, 180);
                     }
 
-                    const linvel = carBody.linvel();
-                    const currentVel = new THREE.Vector3(linvel.x, linvel.y, linvel.z);
-                    const forwardSpeed = currentVel.dot(forward);
                     const currentSpeed = currentVel.length();
-
                     const isThrottleActive = keys.w || keys.s;
                     const isActuallyMoving = currentSpeed > 0.35;
 
@@ -952,30 +1116,30 @@ function ThreeScene() {
                     // Smooth framerate-independent camera direction damping
                     currentCamDir = THREE.MathUtils.damp(currentCamDir, targetCamDir, 6.0, delta);
 
-                    const isBoosting = keys.shift && keys.w;
-
                     if (cameraBadgeRef.current) {
                         if (cameraModeRef.current === 'free_orbit') {
                             cameraBadgeRef.current.innerText = 'FREE ORBIT [V]';
-                            cameraBadgeRef.current.className = 'text-xs font-mono font-bold text-purple-400';
+                            cameraBadgeRef.current.className = 'text-[10px] font-mono font-bold text-purple-400';
                         } else if (isDrivingState) {
                             if (currentCamDir > 0.1) {
                                 cameraBadgeRef.current.innerText = 'REVERSE FRONT 🎥';
-                                cameraBadgeRef.current.className = 'text-xs font-mono font-bold text-amber-400';
+                                cameraBadgeRef.current.className = 'text-[10px] font-mono font-bold text-amber-400';
                             } else {
                                 cameraBadgeRef.current.innerText = 'CHASE REAR 🎥';
-                                cameraBadgeRef.current.className = 'text-xs font-mono font-bold text-cyan-400';
+                                cameraBadgeRef.current.className = 'text-[10px] font-mono font-bold text-cyan-400';
                             }
                         } else {
                             cameraBadgeRef.current.innerText = 'ORBIT READY 🔄';
-                            cameraBadgeRef.current.className = 'text-xs font-mono font-bold text-emerald-400';
+                            cameraBadgeRef.current.className = 'text-[10px] font-mono font-bold text-emerald-400';
                         }
                     }
 
-                    const targetDist = isBoosting ? 8.2 : 7.0;
-                    const targetHeight = isBoosting ? 2.3 : 2.1;
-                    currentFollowDist = THREE.MathUtils.damp(currentFollowDist, targetDist, 3.5, delta);
-                    currentFollowHeight = THREE.MathUtils.damp(currentFollowHeight, targetHeight, 3.5, delta);
+                    // Dynamic camera follow distance: exactly 20% further back on Shift + W with slow, smooth damping
+                    const isShiftBoosting = keys.shift && keys.w;
+                    const targetDist = isShiftBoosting ? userZoomDist * 1.20 : userZoomDist;
+                    const targetHeight = isShiftBoosting ? 2.22 : 2.1;
+                    currentFollowDist = THREE.MathUtils.damp(currentFollowDist, targetDist, 1.2, delta);
+                    currentFollowHeight = THREE.MathUtils.damp(currentFollowHeight, targetHeight, 1.2, delta);
 
                     const lateralCam = new THREE.Vector3(-forward.z, 0, forward.x);
                     const arcSide = (1.0 - currentCamDir * currentCamDir) * (currentFollowDist * 0.7);
@@ -1001,22 +1165,23 @@ function ThreeScene() {
                         controls.target.copy(carCenter);
                         controls.update();
                         currentLookTarget.copy(controls.target);
+                        baseCamPos.copy(camera.position);
                     } else if (isDrivingState) {
                         controls.enabled = false;
 
                         // Framerate-independent camera position damping
-                        camera.position.x = THREE.MathUtils.damp(camera.position.x, desiredCamPos.x, 10.0, delta);
-                        camera.position.y = THREE.MathUtils.damp(camera.position.y, desiredCamPos.y, 10.0, delta);
-                        camera.position.z = THREE.MathUtils.damp(camera.position.z, desiredCamPos.z, 10.0, delta);
+                        baseCamPos.x = THREE.MathUtils.damp(baseCamPos.x, desiredCamPos.x, 10.0, delta);
+                        baseCamPos.y = THREE.MathUtils.damp(baseCamPos.y, desiredCamPos.y, 10.0, delta);
+                        baseCamPos.z = THREE.MathUtils.damp(baseCamPos.z, desiredCamPos.z, 10.0, delta);
 
-                        const toCamNow = new THREE.Vector3().subVectors(camera.position, carCenter);
+                        const toCamNow = new THREE.Vector3().subVectors(baseCamPos, carCenter);
                         toCamNow.y = 0;
                         const currentDist = toCamNow.length();
                         const maxAllowedDist = currentFollowDist * 1.06;
                         if (currentDist > maxAllowedDist && currentDist > 0.01) {
                             toCamNow.normalize().multiplyScalar(maxAllowedDist);
-                            camera.position.x = carCenter.x + toCamNow.x;
-                            camera.position.z = carCenter.z + toCamNow.z;
+                            baseCamPos.x = carCenter.x + toCamNow.x;
+                            baseCamPos.z = carCenter.z + toCamNow.z;
                         }
 
                         // Framerate-independent look target damping
@@ -1024,7 +1189,6 @@ function ThreeScene() {
                         currentLookTarget.y = THREE.MathUtils.damp(currentLookTarget.y, carTargetLook.y, 14.0, delta);
                         currentLookTarget.z = THREE.MathUtils.damp(currentLookTarget.z, carTargetLook.z, 14.0, delta);
 
-                        camera.lookAt(currentLookTarget);
                         controls.target.copy(carCenter);
 
                     } else {
@@ -1033,33 +1197,89 @@ function ThreeScene() {
 
                         if (userHasManuallyOrbited) {
                             controls.update();
+                            baseCamPos.copy(camera.position);
                             currentLookTarget.copy(controls.target);
                         } else {
                             // Framerate-independent smooth settle damping when coming to rest
-                            camera.position.x = THREE.MathUtils.damp(camera.position.x, desiredCamPos.x, 6.0, delta);
-                            camera.position.y = THREE.MathUtils.damp(camera.position.y, desiredCamPos.y, 6.0, delta);
-                            camera.position.z = THREE.MathUtils.damp(camera.position.z, desiredCamPos.z, 6.0, delta);
+                            baseCamPos.x = THREE.MathUtils.damp(baseCamPos.x, desiredCamPos.x, 6.0, delta);
+                            baseCamPos.y = THREE.MathUtils.damp(baseCamPos.y, desiredCamPos.y, 6.0, delta);
+                            baseCamPos.z = THREE.MathUtils.damp(baseCamPos.z, desiredCamPos.z, 6.0, delta);
 
                             currentLookTarget.x = THREE.MathUtils.damp(currentLookTarget.x, carTargetLook.x, 8.0, delta);
                             currentLookTarget.y = THREE.MathUtils.damp(currentLookTarget.y, carTargetLook.y, 8.0, delta);
                             currentLookTarget.z = THREE.MathUtils.damp(currentLookTarget.z, carTargetLook.z, 8.0, delta);
 
-                            camera.lookAt(currentLookTarget);
-
-                            if (camera.position.distanceTo(desiredCamPos) < 0.04 && currentLookTarget.distanceTo(carCenter) < 0.04) {
+                            if (baseCamPos.distanceTo(desiredCamPos) < 0.04 && currentLookTarget.distanceTo(carCenter) < 0.04) {
                                 controls.update();
+                                baseCamPos.copy(camera.position);
                             }
                         }
                     }
-                }
 
-                // Synchronize dynamic obstacles
-                dynamicObstacles.forEach(({ mesh, body }) => {
-                    const t = body.translation();
-                    const r = body.rotation();
-                    mesh.position.set(t.x, t.y, t.z);
-                    mesh.quaternion.set(r.x, r.y, r.z, r.w);
-                });
+                    // Screen Shake (Triggered ONLY by active Shift + W Turbo Boost)
+                    const shakeMultiplier = drivingDynamicsRef.current?.shakeIntensity ?? 1.0;
+                    const shakeEnabled = drivingDynamicsRef.current?.screenShake ?? true;
+
+                    let targetShake = 0.0;
+                    if (isShiftBoosting && shakeEnabled) {
+                        targetShake = 0.048;
+                    }
+                    if (isDrifting && speedKmh > 35.0 && shakeEnabled) {
+                        targetShake = Math.max(targetShake, 0.018);
+                    }
+
+                    currentShakeIntensity = THREE.MathUtils.damp(currentShakeIntensity, targetShake, 10.0, delta);
+                    screenShakePunch = THREE.MathUtils.damp(screenShakePunch, 0.0, 12.0, delta);
+
+                    const totalShake = (currentShakeIntensity + screenShakePunch) * shakeMultiplier;
+
+                    camera.position.copy(baseCamPos);
+
+                    if (totalShake > 0.0005) {
+                        shakeTime += delta * 48.0;
+                        const sx = (Math.sin(shakeTime * 1.0) * 0.7 + Math.sin(shakeTime * 2.37) * 0.3) * totalShake;
+                        const sy = (Math.cos(shakeTime * 1.41) * 0.6 + Math.sin(shakeTime * 3.19) * 0.4) * totalShake * 0.75;
+
+                        const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                        const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+
+                        camera.position.addScaledVector(camRight, sx);
+                        camera.position.addScaledVector(camUp, sy);
+
+                        const lookShaken = new THREE.Vector3(
+                            currentLookTarget.x + sx * 0.25,
+                            currentLookTarget.y + sy * 0.25,
+                            currentLookTarget.z
+                        );
+                        camera.lookAt(lookShaken);
+
+                        const shakeRoll = Math.sin(shakeTime * 1.15) * totalShake * 0.04;
+                        camera.rotation.z += shakeRoll;
+                    } else {
+                        camera.lookAt(currentLookTarget);
+                    }
+
+                    // Background Blur on Shift + W Boost (Slow, gradual approach)
+                    const speedBlurEnabled = drivingDynamicsRef.current?.speedBlur ?? true;
+                    const targetBlurFactor = (isShiftBoosting && speedBlurEnabled) 
+                        ? Math.min(0.70, 0.35 + (speedKmh / 100) * 0.35) 
+                        : 0.0;
+                    currentSpeedBlur = THREE.MathUtils.damp(currentSpeedBlur, targetBlurFactor, 1.8, delta);
+
+                    if (speedBlurRef.current) {
+                        if (currentSpeedBlur > 0.01) {
+                            const blurPx = Math.round(currentSpeedBlur * 8);
+                            speedBlurRef.current.style.opacity = currentSpeedBlur.toFixed(3);
+                            speedBlurRef.current.style.backdropFilter = `blur(${blurPx}px)`;
+                            speedBlurRef.current.style.webkitBackdropFilter = `blur(${blurPx}px)`;
+                            speedBlurRef.current.style.display = 'block';
+                        } else {
+                            speedBlurRef.current.style.opacity = '0';
+                            speedBlurRef.current.style.backdropFilter = 'none';
+                            speedBlurRef.current.style.webkitBackdropFilter = 'none';
+                        }
+                    }
+                }
 
                 // Debug Colliders Wireframe Rendering
                 if (debugVisibleRef.current) {
@@ -1096,6 +1316,7 @@ function ThreeScene() {
             window.removeEventListener('blur', handleBlur);
             window.removeEventListener('car:respawn', handleCarRespawn);
             window.removeEventListener('ground:rebuild-physics', handleRebuildPhysics);
+            window.removeEventListener('wheel', handleWheel);
             rebuildWheelCollidersRef.current = null;
             carSceneRef.current = null;
 
@@ -1103,6 +1324,12 @@ function ThreeScene() {
                 ground.dispose();
                 ground = null;
                 groundRef.current = null;
+            }
+
+            if (road) {
+                road.dispose();
+                road = null;
+                roadRef.current = null;
             }
 
             debugGeometry.dispose();
@@ -1125,31 +1352,17 @@ function ThreeScene() {
         <div className="fixed inset-0 w-full h-full overflow-hidden select-none font-sans">
             {/* 3D WebGL Canvas */}
             <div ref={mountRef} className="w-full h-full" />
-
-            
-            {/* Bottom-Left Speedometer & Driving HUD */}
-            <div className="absolute top-6 left-6 pointer-events-none  z-10 flex flex-col gap-2">
-                <div className="flex items-baseline gap-2 bg-neutral-900/85 backdrop-blur-md border border-white/10 mx-auto flex flex-center py-10 rounded-2xl px-5 py-3 shadow-2xl">
-                    <span ref={speedRef} className="text-5xl font-mono font-black tracking-tight text-white">0</span>
-                    <span className="text-sm font-mono font-bold text-neutral-400">KM/H</span>
-                    <div className="ml-4 pl-4 border-l border-white/10 flex flex-col">
-                    </div>
-                </div>
-                
-            </div>
-
             {/* Bottom-Right Seeded Perlin Noise Radar Mini-Map */}
             {groundParams.showRadar && (
-                <div className="absolute bottom-6 right-6 pointer-events-none z-10 flex flex-col items-end gap-1.5">
-                    <div className="relative p-2 rounded-2xl bg-neutral-900/85 backdrop-blur-md border border-white/15 shadow-2xl flex flex-col items-center">
-                
+                <div className="absolute bottom-6 right-6 pointer-events-none z-10 flex flex-col items-end gap-1">
+                    <div className="relative p-1.5 rounded-2xl bg-neutral-900/85 backdrop-blur-md border border-white/15 shadow-2xl flex flex-col items-center">
                         <canvas
                             ref={radarCanvasRef}
-                            width={160}
-                            height={160}
-                            className="w-[160px] h-[160px] mt-1.5 rounded-full shadow-inner"
+                            width={110}
+                            height={110}
+                            className="w-[110px] h-[110px] mt-1 rounded-full shadow-inner"
                         />
-                        <div ref={coordsRef} className="mt-1.5 text-[10px] font-mono text-neutral-400">
+                        <div ref={coordsRef} className="mt-1 text-[9px] font-mono text-neutral-400">
                             X: 0.0 | Z: 0.0 | Y: 0.0m
                         </div>
                     </div>
